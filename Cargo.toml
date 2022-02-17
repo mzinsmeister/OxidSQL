@@ -1,0 +1,16 @@
+[package]
+name = "oxid_sql"
+version = "0.1.0"
+authors = ["Michael Zismeister <m.zinsmeister@live.de>"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+sled = "0.34.7"
+zerocopy = "0.6.1"
+byteorder = "1.4.3"
+
+[dependencies.nom]
+version = "^6"
+features = ["regexp"]
