@@ -63,7 +63,7 @@ impl Planner<'_> {
         let column = match item1 {
             SqlComparisonItem::Literal(_) => {
                 match item2 {
-                    SqlComparisonItem::Literal(_) => panic!("2 literals"), //TODO: Fix this
+                    SqlComparisonItem::Literal(_) => return self.plan_other_select(query),
                     SqlComparisonItem::Reference(r) => r
                 }
             }
@@ -74,7 +74,7 @@ impl Planner<'_> {
             SqlComparisonItem::Reference(_) => {
                 match item2 {
                     SqlComparisonItem::Literal(l) => l,
-                    SqlComparisonItem::Reference(_) => panic!("two references") //TODO: Fix this
+                    SqlComparisonItem::Reference(_) => return self.plan_other_select(query)
                 }
             }
         };

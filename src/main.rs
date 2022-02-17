@@ -81,7 +81,7 @@ fn main() {
     println!("Result: {:#?}", result);
 
     println!("#################INSERT##################");
-    let parsed_query = parse_query("INSERT INTO test2 VALUES (4, 'tttt')").unwrap().1;
+    let parsed_query = parse_query("INSERT INTO test2 VALUES (4, 'ttt')").unwrap().1;
     println!("-----------------Parser-----------------");
     println!("{:#?}", &parsed_query);
     let analyzed_query = analyzer.analyze_query_tree(&parsed_query);
@@ -111,7 +111,7 @@ fn main() {
     println!("Result: {:#?}", result);*/
 
     println!("#################JOIN##################");
-    let parsed_select = parse_query("SELECT text, id, 2text, 2id from test, test2 WHERE id = 2 AND 2id = 4").unwrap().1;
+    let parsed_select = parse_query("SELECT text, id, 2text, 2id from test, test2 WHERE text = 2text").unwrap().1;
     println!("-----------------Parser-----------------");
     println!("{:#?}", &parsed_select);
     let analyzed_query = analyzer.analyze_query_tree(&parsed_select);
