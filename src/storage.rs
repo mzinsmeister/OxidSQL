@@ -8,7 +8,6 @@ use crate::catalog::{TableMeta, Type};
 use crate::database::TupleValue;
 use zerocopy::AsBytes;
 use std::collections::BTreeMap;
-use nom::number::Endianness::Big;
 use std::convert::TryInto;
 
 #[derive(Copy, Clone)]
@@ -139,6 +138,7 @@ fn deserialize_primary_key_values(bytes: &[u8], table_meta: &TableMeta) -> Vec<T
     parsed_pk
 }
 
+#[derive(Clone)]
 pub struct SledStorageEngine {
     sled_db: sled::Db
 }

@@ -17,11 +17,11 @@ pub enum QueryPlanNode {
     CreateTable(TableDefinition)
 }
 
-pub struct Planner<'a> {
-    catalog: Catalog<'a>
+pub struct Planner {
+    catalog: Catalog
 }
 
-impl Planner<'_> {
+impl Planner {
     pub fn new(catalog: Catalog) -> Planner {
         Planner { catalog }
     }

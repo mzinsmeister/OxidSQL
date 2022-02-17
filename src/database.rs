@@ -1,3 +1,7 @@
+use std::error::Error;
+
+use crate::{storage::SledStorageEngine, catalog::Catalog, planner::Planner, executor::{Executor, ResultSet}, analyze::Analyzer, parser::parse_query};
+
 #[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub enum TupleValue {
     Long(i64),
@@ -39,4 +43,45 @@ impl TupleValue {
             panic!("Not an unsigned int");
         }
     }
+}
+
+pub struct OxidSqlDatabase {
+    analyzer: Analyzer,
+    planner: Planner,
+    executor: Executor
+}
+
+impl OxidSqlDatabase {
+    pub fn new() -> OxidSqlDatabase {
+        let storage_engine = SledStorageEngine::new();
+        let catalog = Catalog::new(storage_engine.clone());
+        catalog.init_catalog();
+        let analyzer = Analyzer::new(catalog);
+        let planner = Planner::new(Catalog::new(storage_engine.clone()));
+        let executor = Executor::new(storage_engine);
+        OxidSqlDatabase {
+            analyzer,
+            planner,
+            executor
+        }
+    }
+
+    pub fn query(&self, query: &str) -> Result<ResultSet, Box<dyn Error>> {
+        let parsed_query = parse_query(&query)
+            .map_err(|err| err
+                .map(|err| nom::error::Error::new(err.input.to_string(), err.code)))?.1;
+        dbg!("-----------------Parser-----------------");
+        dbg!(&parsed_query);
+        let analyzed_query = self.analyzer.analyze_query_tree(&parsed_query);
+        dbg!("----------------Analyzer----------------");
+        dbg!(&analyzed_query);
+        let query_plan = self.planner.plan_query(analyzed_query);
+        dbg!("----------------Planner-----------------");
+        dbg!(&query_plan);
+        let result = self.executor.execute(&query_plan)?;
+        dbg!("----------------Executor-----------------");
+        dbg!(&result);
+        Ok(result)
+    }
+
 }

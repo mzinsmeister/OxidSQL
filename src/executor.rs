@@ -6,14 +6,17 @@ use crate::database::TupleValue;
 use crate::catalog::{Catalog, ColumnMeta, TableMeta};
 use nom::lib::std::collections::BTreeMap;
 
-pub struct Executor<'a> {
-    storage_engine: &'a SledStorageEngine,
-    catalog: Catalog<'a>
+pub struct Executor {
+    storage_engine: SledStorageEngine,
+    catalog: Catalog
 }
 
-impl Executor<'_> {
-    pub fn new(storage_engine: &SledStorageEngine) -> Executor {
-        Executor { storage_engine, catalog: Catalog::new(storage_engine) }
+impl Executor {
+    pub fn new(storage_engine: SledStorageEngine) -> Executor {
+        Executor { 
+            storage_engine: storage_engine.clone(),
+            catalog: Catalog::new(storage_engine) 
+        }
     }
 
     pub fn execute(&self, plan: &QueryPlan) -> Result<ResultSet, Box<dyn Error>> {

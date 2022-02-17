@@ -5,16 +5,14 @@ use std::io::Cursor;
 use nom::lib::std::collections::BTreeMap;
 use crate::database::TupleValue;
 use crate::analyze::TableDefinition;
-use std::any::Any;
-use nom::character::complete::tab;
 
-pub struct Catalog<'a> {
-    storage_engine: &'a SledStorageEngine,
+pub struct Catalog {
+    storage_engine: SledStorageEngine,
     system_tables_meta: BTreeMap<u32, TableMeta>
 }
 
-impl Catalog<'_> {
-    pub fn new(storage_engine: &SledStorageEngine) -> Catalog {
+impl Catalog {
+    pub fn new(storage_engine: SledStorageEngine) -> Catalog {
         Catalog {
             storage_engine,
             system_tables_meta: make_system_tables_meta_map()

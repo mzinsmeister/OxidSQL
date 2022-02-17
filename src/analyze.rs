@@ -4,7 +4,6 @@ use std::error::Error;
 use std::fmt::{Display, Formatter, Debug};
 use crate::database::TupleValue;
 use crate::analyze::AnalyzerError::MultiplePrimaryKeysError;
-use crate::parser::TableDefinitionItem::PrimaryKeyDefinition;
 
 #[derive(Debug)]
 pub enum Query {
@@ -103,11 +102,11 @@ impl Display for AnalyzerError {
 
 impl Error for AnalyzerError{}
 
-pub struct Analyzer<'a> {
-    catalog: Catalog<'a>
+pub struct Analyzer {
+    catalog: Catalog
 }
 
-impl Analyzer<'_> {
+impl Analyzer {
 
     pub fn new(catalog: Catalog) -> Analyzer {
         Analyzer { catalog }
