@@ -16,3 +16,4 @@ Cargo.lock
 .vscode/
 .idea/
 data/
+sled_test/
