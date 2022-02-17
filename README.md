@@ -13,7 +13,7 @@ v1 can do:
 - SELECT including joins (without the JOIN keyword)
 
 The code of v1 is kinda hacked together and not very nice to read.
-There is currently still some stuff in selects especially which i will likely fix before moving
+There is currently still some stuff especially in selects which i will likely fix before moving
 on to v2. The query planner is basically the most primitive planner you can have. It has exactly
 one optimization which is that it will do a primary key lookup when the query has exactly the form
 "SELECT \[any colums\] FROM \[exactly one table\] WHERE \[primary key column\] = \[literal\]".
@@ -21,10 +21,11 @@ Everything else is handled by a simple combination of sequential scans and neste
 If there's a WHERE-clause it will be evaluated over the cross product of all tables.
 The goal of this first version was first and foremost to produce a working database that can
 actually do useful work without needing to programatically set some predefined state.
-For the KV mapping i used heavily relied on the way cockroachdb was doing it before they switched
-to their new layout. Transactions are currently not supported but once sled can actually do
-proper ACID transactions it would be kinda trivial to add i think. You could of course also 
-implement MVCC at the KV level like i think cockroachdb also does.
+For the KV mapping i used something very similar on the way cockroachdb was doing it 
+before they switched to their new layout. Transactions are currently not supported 
+but once sled can actually do proper ACID transactions it would be kinda trivial to 
+add i think. You could of course also implement MVCC at the KV level like i think 
+cockroachdb also does.
 
 The goals with v2 are:
 - Write my own storage engine
@@ -38,4 +39,5 @@ The goals with v2 are:
 I will likely first implement the storage engine because you can test that in isolation pretty well.
 I will also likely implement create table, insert and select first again and leave the rest for
 later. All the multi user, transactional and server stuff or maybe a proper optimizer
-will likely come last.
+will likely come last (since i found the planner/optimizer to be the part i found hardest to 
+write in v1).
