@@ -5,6 +5,8 @@ use std::error::Error;
 use crate::analyze::{QueryColumn, SqlFilterExpression, SqlComparisonExpression, SqlLogicalExpression, SqlComparisonItem, TableDefinition};
 use crate::database::TupleValue;
 use crate::catalog::{Catalog, ColumnMeta, TableMeta};
+use cli_table::{Cell, print_stdout, Table, Style, CellStruct};
+use cli_table::format::Justify;
 use nom::lib::std::collections::BTreeMap;
 
 struct SequentialScanIterator {
@@ -377,6 +379,23 @@ impl ResultColumn {
 pub struct ResultSet {
     pub columns: Vec<ResultColumn>,
     pub data: Vec<Vec<TupleValue>>
+}
+
+impl ResultSet {
+
+    pub fn print(&self) {
+        let table = self.data.iter().map(|l|{
+            l.iter().map(|v| v.to_string().cell()).collect::<Vec<CellStruct>>()
+        }).collect::<Vec<Vec<CellStruct>>>()
+        .table()
+        .title(self.columns.iter().map(|c| 
+                format!("{}.{}", c.table.name, c.column.name).cell().bold(true))
+            .collect::<Vec<CellStruct>>()
+        )
+        .bold(true);
+        print_stdout(table).unwrap();
+    }
+
 }
 
 type RowIterator = Box<dyn ResettableIterator<Item=Result<Vec<TupleValue>, sled::Error>>>;

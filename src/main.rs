@@ -28,10 +28,10 @@ fn main() {
     db.query("INSERT INTO test2 VALUES (4, 'ttt')").unwrap();
 
     println!("#################SELECT##################");
-    db.query("SELECT text, id from test where id = 3").unwrap();
+    db.query("SELECT text, id from test where id = 3").unwrap().print();
 
     println!("#################JOIN##################");
-    db.query("SELECT text, id, 2text, 2id from test, test2 WHERE text = 2text").unwrap();
+    db.query("SELECT text, id, 2text, 2id from test, test2 WHERE text = 2text").unwrap().print();
 
 
     /*let start_time = std::time::SystemTime::now();

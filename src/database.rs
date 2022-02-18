@@ -1,4 +1,4 @@
-use std::error::Error;
+use std::{error::Error, fmt::Display};
 
 use crate::{storage::SledStorageEngine, catalog::Catalog, planner::Planner, executor::{Executor, ResultSet}, analyze::Analyzer, parser::parse_query};
 
@@ -41,6 +41,17 @@ impl TupleValue {
             uint
         } else {
             panic!("Not an unsigned int");
+        }
+    }
+}
+
+impl Display for TupleValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TupleValue::Long(v) => write!(f, "{}", v),
+            TupleValue::UnsignedInt(v) => write!(f, "{}", v),
+            TupleValue::String(v) => write!(f, "{}", v),
+            TupleValue::Bytes(_) => unimplemented!("Bytes can't be displayed at the moment"),
         }
     }
 }
