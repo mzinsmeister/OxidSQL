@@ -10,27 +10,26 @@ mod executor;
 use crate::database::OxidSqlDatabase;
 
 fn main() {
+    env_logger::init();
+
     // delete database files
     std::fs::remove_dir_all("sled_test/testdb").unwrap_or(());
 
     let db = OxidSqlDatabase::new();
 
-    println!("###############CREATE TABLE 1################");
+    println!("############### CREATE TABLEs ################");
     db.query("CREATE TABLE test (id long, text varchar(100), PRIMARY KEY(id))").unwrap();
-
-    println!("###############CREATE TABLE 2################");
     db.query("CREATE TABLE test2 (2id long, 2text varchar(100), PRIMARY KEY(2id))").unwrap();
-    
 
-    println!("#################INSERT##################");
+    println!("################# INSERTs ##################");
     db.query("INSERT INTO test VALUES (3, 'ttt')").unwrap();
     db.query("INSERT INTO test VALUES (2, 'tt')").unwrap();
     db.query("INSERT INTO test2 VALUES (4, 'ttt')").unwrap();
 
-    println!("#################SELECT##################");
+    println!("################# SELECT ##################");
     db.query("SELECT text, id from test where id = 3").unwrap().print();
 
-    println!("#################JOIN##################");
+    println!("################# JOIN ##################");
     db.query("SELECT text, id, 2text, 2id from test, test2 WHERE text = 2text").unwrap().print();
 
 

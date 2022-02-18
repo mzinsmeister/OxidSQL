@@ -1,5 +1,7 @@
 use std::{error::Error, fmt::Display};
 
+use log::debug;
+
 use crate::{storage::SledStorageEngine, catalog::Catalog, planner::Planner, executor::{Executor, ResultSet}, analyze::Analyzer, parser::parse_query};
 
 #[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
@@ -81,17 +83,17 @@ impl OxidSqlDatabase {
         let parsed_query = parse_query(&query)
             .map_err(|err| err
                 .map(|err| nom::error::Error::new(err.input.to_string(), err.code)))?.1;
-        dbg!("-----------------Parser-----------------");
-        dbg!(&parsed_query);
+        debug!("-----------------Parser-----------------");
+        debug!("{:#?}", &parsed_query);
         let analyzed_query = self.analyzer.analyze_query_tree(&parsed_query);
-        dbg!("----------------Analyzer----------------");
-        dbg!(&analyzed_query);
+        debug!("----------------Analyzer----------------");
+        debug!("{:#?}", &analyzed_query);
         let query_plan = self.planner.plan_query(analyzed_query);
-        dbg!("----------------Planner-----------------");
-        dbg!(&query_plan);
+        debug!("----------------Planner-----------------");
+        debug!("{:#?}", &query_plan);
         let result = self.executor.execute(&query_plan)?;
-        dbg!("----------------Executor-----------------");
-        dbg!(&result);
+        debug!("----------------Executor-----------------");
+        debug!("{:#?}", &result);
         Ok(result)
     }
 

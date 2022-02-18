@@ -11,6 +11,8 @@ sled = "0.34.7"
 zerocopy = "0.6.1"
 byteorder = "1.4.3"
 cli-table = "0.4"
+log = "0.4"
+env_logger = "0.8.4"
 
 [dependencies.nom]
 version = "^6"
