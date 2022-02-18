@@ -6,6 +6,7 @@ use byteorder::ReadBytesExt;
 use std::io::{Cursor, BufRead};
 use crate::catalog::{TableMeta, Type};
 use crate::database::TupleValue;
+use crate::resettable_iterator::ResettableIterator;
 use zerocopy::AsBytes;
 use std::collections::BTreeMap;
 use std::convert::TryInto;
@@ -60,6 +61,8 @@ impl DbSingleValueKey<'_> {
 
 pub struct ResultRowIterator {
     sled_iter: sled::Iter,
+    sled_db: sled::Db,
+    prefix: Vec<u8>,
     table_meta: TableMeta
 }
 
@@ -97,6 +100,12 @@ impl Iterator for ResultRowIterator {
         } else {
             None
         }
+    }
+}
+
+impl ResettableIterator for ResultRowIterator {
+    fn reset(&mut self) {
+        self.sled_iter = self.sled_db.scan_prefix(&self.prefix)
     }
 }
 
@@ -158,6 +167,8 @@ impl SledStorageEngine {
         let db_key_bytes = db_key.as_bytes();
         ResultRowIterator {
             sled_iter: self.sled_db.scan_prefix(&db_key_bytes),
+            sled_db: self.sled_db.clone(),
+            prefix: db_key_bytes,
             table_meta: table
         }
     }
@@ -193,6 +204,8 @@ impl SledStorageEngine {
         let db_key: u64 = (table.id as u64) << 32;
         ResultRowIterator {
             sled_iter: self.sled_db.scan_prefix(&db_key.to_be_bytes()),
+            sled_db: self.sled_db.clone(),
+            prefix: db_key.to_be_bytes().to_vec(),
             table_meta: table
         }
     }

@@ -1,8 +1,9 @@
+mod database;
+mod resettable_iterator;
 mod analyze;
 mod catalog;
 mod parser;
 mod storage;
-mod database;
 mod planner;
 mod executor;
 

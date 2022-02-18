@@ -1,10 +1,142 @@
-use crate::storage::SledStorageEngine;
+use crate::resettable_iterator::{ResettableIterator, EmptyResettableIterator, OnceResettableIterator};
+use crate::storage::{SledStorageEngine, ResultRowIterator};
 use crate::planner::{QueryPlan, QueryPlanNode};
 use std::error::Error;
 use crate::analyze::{QueryColumn, SqlFilterExpression, SqlComparisonExpression, SqlLogicalExpression, SqlComparisonItem, TableDefinition};
 use crate::database::TupleValue;
 use crate::catalog::{Catalog, ColumnMeta, TableMeta};
 use nom::lib::std::collections::BTreeMap;
+
+struct SequentialScanIterator {
+    iterator: ResultRowIterator,
+    filter: ScanFilter
+}
+
+impl Iterator for SequentialScanIterator {
+    type Item = Result<Row, sled::Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.iterator.next() {
+                Some(Ok(row)) => {
+                    if self.filter.check(&row) {
+                        return Some(Ok(row))
+                    }
+                },
+                Some(Err(e)) => return Some(Err(e)),
+                None => return None,
+            }
+        }
+    }
+}
+
+impl ResettableIterator for SequentialScanIterator {
+    fn reset(&mut self) {
+        self.iterator.reset();
+    }
+}
+
+struct ProjectionIterator {
+    iterator: RowIterator,
+    old_indexes: Vec<usize>
+}
+
+impl Iterator for ProjectionIterator {
+    type Item = Result<Row, sled::Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.iterator.next() {
+            Some(Ok(row)) => {
+                let mut new_row = Vec::with_capacity(self.old_indexes.len());
+                for &old_index in self.old_indexes.iter() {
+                    new_row.push(row[old_index].to_owned());
+                }
+                Some(Ok(new_row))
+            },
+            Some(Err(e)) => Some(Err(e)),
+            None => None
+        }
+    }
+}
+
+impl ResettableIterator for ProjectionIterator {
+    fn reset(&mut self) {
+        self.iterator.reset();
+    }
+}
+
+struct NestedLoopJoinIterator {
+    left_iter: RowIterator,
+    right_iter: RowIterator,
+    left_current: Option<Result<Vec<TupleValue>, sled::Error>>,
+    filter: Option<ScanFilter>
+}
+
+impl NestedLoopJoinIterator {
+
+    fn new(mut left: RowIterator, right: RowIterator, filter: Option<ScanFilter>) -> Result<NestedLoopJoinIterator, sled::Error> {
+        let left_first = left.next();
+        Ok(NestedLoopJoinIterator {
+            left_iter: left,
+            right_iter: right,
+            left_current: left_first,
+            filter
+        })
+    }
+
+}
+
+impl Iterator for NestedLoopJoinIterator {
+    type Item = Result<Row, sled::Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(left_current) = &self.left_current {
+                match left_current {
+                    Ok(v) => {
+                        match self.right_iter.next() {
+                            Some(Ok(rrow)) => {
+                                let row = v.iter().cloned().chain(rrow.iter().cloned()).collect();
+                                if self.filter.as_ref().map_or(true, |f| f.check(&row)) {
+                                    return Some(Ok(row))
+                                } else {
+                                    continue;
+                                }
+                            },
+                            Some(Err(e)) => return Some(Err(e)),
+                            None => {
+                                self.left_current = self.left_iter.next();
+                                self.right_iter.reset();
+                                continue;
+                            },
+                        }
+                    },
+                    Err(e) => {
+                        let error = e.clone();
+                        self.left_current = self.left_iter.next();
+                        return Some(Err(error))
+                    }
+                }
+            } else {
+                return None
+            }
+        }
+    }
+}
+
+impl ResettableIterator for NestedLoopJoinIterator {
+    fn reset(&mut self) {
+        self.left_iter.reset();
+        self.right_iter.reset();
+        self.left_current = self.left_iter.next();
+    }
+}
+
+struct ScanFilter {
+    where_clause: SqlFilterExpression,
+    column_index: BTreeMap<(u32, u32), usize>
+}
+
 
 pub struct Executor {
     storage_engine: SledStorageEngine,
@@ -61,19 +193,10 @@ impl Executor {
             old_indexes.push(old_index);
             final_columns.push(input.columns[old_index].to_owned());
         }
-        let final_iter = input.row_iterator
-            .map(move |r| {
-                match r {
-                    Ok(row) => {
-                        let mut new_row = Vec::with_capacity(number_of_columns);
-                        for &old_index in old_indexes.iter() {
-                            new_row.push(row[old_index].to_owned());
-                        }
-                        Ok(new_row)
-                    },
-                    Err(_) => r
-                }
-            });
+        let final_iter = ProjectionIterator {
+            iterator: input.row_iterator,
+            old_indexes
+        };
         Ok(IntermediateResult {
             columns: final_columns,
             row_iterator: Box::new(final_iter)
@@ -95,14 +218,10 @@ impl Executor {
         let columns: Vec<ResultColumn> = table_meta.columns.values().map(|c| ResultColumn::new(&table_meta, c)).collect();
         if let Some(w) = where_clause {
             let scan_filter =  ScanFilter::compile(w.to_owned(), &columns);
-            let iter = self.storage_engine.scan_table(table_meta)
-                .filter(move |r| {
-                    if let Ok(row) = r {
-                        scan_filter.check(row)
-                    } else {
-                        true
-                    }
-                });
+            let iter = SequentialScanIterator {
+                iterator: self.storage_engine.scan_table(table_meta),
+                filter: scan_filter
+            };
             Ok(IntermediateResult {
                 columns,
                 row_iterator: Box::new(iter)
@@ -125,12 +244,12 @@ impl Executor {
         if let Some(result_row) = result {
             Ok(IntermediateResult {
                 columns,
-                row_iterator: Box::new(std::iter::once(result_row))
+                row_iterator: Box::new(OnceResettableIterator::new(result_row))
             })
         } else {
             Ok(IntermediateResult {
                 columns,
-                row_iterator: Box::new(std::iter::empty())
+                row_iterator: Box::new(EmptyResettableIterator{})
             })
         }
     }
@@ -143,7 +262,7 @@ impl Executor {
         self.storage_engine.flush();
         Ok(IntermediateResult {
             columns: vec![],
-            row_iterator: Box::new(std::iter::empty())
+            row_iterator: Box::new(EmptyResettableIterator{})
         })
     }
 
@@ -153,75 +272,11 @@ impl Executor {
         self.storage_engine.flush();
         Ok(IntermediateResult {
             columns: vec![],
-            row_iterator: Box::new(std::iter::empty())
+            row_iterator: Box::new(EmptyResettableIterator{})
         })
     }
 }
 
-struct NestedLoopJoinIterator {
-    left_iter: RowIterator,
-    right_index: usize,
-    left_current: Option<Result<Vec<TupleValue>, sled::Error>>,
-    right_complete: Vec<Vec<TupleValue>>,
-    filter: Option<ScanFilter>
-}
-
-impl NestedLoopJoinIterator {
-
-    fn new(mut left: RowIterator, right: RowIterator, filter: Option<ScanFilter>) -> Result<NestedLoopJoinIterator, sled::Error> {
-        let right_complete = right.collect::<Result<Vec<Row>, sled::Error>>()?;
-        let left_first = left.next();
-        Ok(NestedLoopJoinIterator {
-            left_iter: left,
-            right_index: 0,
-            right_complete, //TODO: Fix this (requires resettable executor iterators)
-            left_current: left_first,
-            filter
-        })
-    }
-
-}
-
-impl Iterator for NestedLoopJoinIterator {
-    type Item = Result<Row, sled::Error>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if let Some(left_current) = &self.left_current {
-                match left_current {
-                    Ok(v) => {
-                        if self.right_index >= self.right_complete.len() {
-                            self.left_current = self.left_iter.next();
-                            self.right_index = 0;
-                            continue;
-                        } else {
-                            let row = v.iter().cloned().chain(self.right_complete[self.right_index].iter().cloned()).collect();
-                            self.right_index += 1;
-                            if self.filter.as_ref().map_or(true, |f| f.check(&row)) {
-                                return Some(Ok(row))
-                            } else {
-                                continue;
-                            }
-                        }
-                    },
-                    Err(e) => {
-                        let error = e.clone();
-                        self.left_current = self.left_iter.next();
-                        return Some(Err(error))
-                    }
-                }
-            } else {
-                return None
-            }
-        }
-    }
-}
-
-
-struct ScanFilter {
-    where_clause: SqlFilterExpression,
-    column_index: BTreeMap<(u32, u32), usize>
-}
 
 impl ScanFilter {
     fn compile(where_clause: SqlFilterExpression, columns: &Vec<ResultColumn>) -> ScanFilter {
@@ -324,7 +379,7 @@ pub struct ResultSet {
     pub data: Vec<Vec<TupleValue>>
 }
 
-type RowIterator = Box<dyn Iterator<Item=Result<Vec<TupleValue>, sled::Error>>>;
+type RowIterator = Box<dyn ResettableIterator<Item=Result<Vec<TupleValue>, sled::Error>>>;
 type Row = Vec<TupleValue>;
 
 struct IntermediateResult {
