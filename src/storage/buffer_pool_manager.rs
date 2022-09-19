@@ -1,10 +1,11 @@
-use crate::storage::page::{Page, PAGE_SIZE};
-use std::collections::{HashMap, LinkedList};
+use crate::storage::page::{Page};
+use std::collections::{HashMap};
 use std::sync::{Arc, RwLock, Mutex};
 
 use super::disk::DiskManager;
 use super::clock_replacer::ClockReplacer;
 use super::page::{PageId, RelationIdType};
+use super::replacer::Replacer;
 
 pub type PageType = Arc<RwLock<Page>>;
 pub(super) type PageTableType = HashMap<PageId, Arc<RwLock<Page>>>;
@@ -12,43 +13,45 @@ pub(super) type PageTableType = HashMap<PageId, Arc<RwLock<Page>>>;
 pub struct BufferPoolManager {
     // To avoid deadlocks:
     // Always take pagetable lock before replacer lock unless
-    // You only need one of them. API basically enforces this anyway
+    // You only need one of them.
     pagetable: Mutex<PageTableType>,
     disk_manager: DiskManager,
-    replacer: Mutex<ClockReplacer>
+    replacer: Mutex<Box<dyn Replacer>>,
+    size: usize
 }
 
 impl BufferPoolManager {
     pub fn new(disk_manager: DiskManager, size: usize) -> BufferPoolManager {
         return BufferPoolManager {
-            pagetable: HashMap::new(),
+            pagetable: Mutex::new(HashMap::new()),
             disk_manager,
-            replacer: ClockReplacer::new();
+            replacer: Mutex::new(Box::new(ClockReplacer::new())),
+            size
         };
     }
 
-    fn find_victim(&mut self) -> (usize, PageType) {
-        let found: Option<(usize, PageType)> = self
-            .freelist
-            .pop_front()
-            .map(|i| (i, self.pages[i].page.clone()));
-        if let Some(found) = found {
-            return found;
-        }
-        loop {
-            let mut check_page = &mut self.pages[self.clock_pos];
-            let is_victim = !check_page.clock_used;
-            check_page.clock_used = false;
-            if is_victim && Arc::strong_count(&check_page.page) == 1 {
-                return (self.clock_pos, check_page.page.clone());
+    fn load(&mut self, page_id: PageId) {
+        let pagetable = self.pagetable.lock().unwrap();
+        let replacer = self.replacer.lock().unwrap();
+        let page = if pagetable.len() < self.size {
+            let page = Arc::new(RwLock::new(Page::new()));
+            pagetable[&page_id] = page.clone();
+            let page = page.write().unwrap();
+            drop(pagetable);
+            replacer.load_page(page_id);
+            drop(replacer);
+        } else {
+            let victim = replacer.find_victim();
+        };
+        self.disk_manager.read_page(page_id, &mut page.data);
+        if let Some(victim_id) = victim {
+             else {
+                
             }
-            self.clock_pos += 1;
-            self.clock_pos %= self.pages.len();
-        }
-    }
+        } else {
 
-    fn load(&mut self, page: PageId) -> usize {
-        let (victim_index, victim) = self.find_victim();
+        }
+        drop(replacer);
         let mut victim_write = victim.write().unwrap();
         if let Some(id) = victim_write.id {
             if victim_write.dirty {
@@ -91,4 +94,8 @@ impl BufferPoolManager {
             }
         }
     }
+}
+
+pub struct RefCountAccessor {
+    page_table: Arc<Mutex<PageTableType>>
 }
