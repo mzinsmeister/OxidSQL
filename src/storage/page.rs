@@ -2,6 +2,7 @@ use std::io::{Cursor};
 use std::error::Error;
 use std::convert::TryInto;
 use std::fmt::{Display, Formatter};
+use std::sync::{RwLock, Arc};
 use byteorder::{BigEndian, WriteBytesExt, ReadBytesExt};
 
 pub type RelationIdType = u16;
@@ -65,10 +66,10 @@ pub struct Page{
 
 impl Page {
     pub fn new() -> Page {
-        let mut new_page =  Page {
+        let mut new_page = Page {
             dirty: false,
-            data: [0; PAGE_SIZE],
             id: Option::None,
+            data: Box::new([0; PAGE_SIZE])
         };
         new_page.set_free_end((PAGE_SIZE - 1) as u16);
         new_page.set_special_start(PAGE_SIZE as u16);
@@ -98,7 +99,7 @@ impl Page {
     }
 
     pub fn get_u16_tuple(&self, pos: usize) -> (u16, u16) {
-        let mut cursor = Cursor::new(self.data);
+        let mut cursor = Cursor::new(&*self.data);
         cursor.set_position(pos as u64);
         let v1 = cursor.read_u16::<BigEndian>().unwrap();
         let v2 = cursor.read_u16::<BigEndian>().unwrap();

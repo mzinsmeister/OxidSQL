@@ -1,6 +1,6 @@
 mod storage;
 
-use std::{fs::{create_dir_all, OpenOptions}, path::Path, io::Write, os::windows::prelude::OpenOptionsExt};
+use std::{fs::{create_dir_all, OpenOptions}, path::Path};
 
 fn main() {
     let datafile_path = Path::new("./data/test.data");
@@ -13,7 +13,4 @@ fn main() {
         .write(true)
         .open(datafile_path)
         .unwrap();
-
-    
-
 }

@@ -1,6 +1,6 @@
-use std::{collections::{VecDeque, HashMap}, sync::{Arc, Mutex}};
+use std::{collections::HashMap};
 
-use super::{page::PageId, replacer::Replacer};
+use super::{page::PageId, replacer::Replacer, buffer_pool_manager::RefCountAccessor};
 
 
 struct ClockPageInfo {
@@ -26,14 +26,14 @@ impl ClockReplacer {
 
 impl Replacer for ClockReplacer {
 
-  fn find_victim(&mut self) -> Option<PageId> {
-    let victim = Option::None;
+  fn find_victim(&mut self, refcount_accessor: &RefCountAccessor) -> Option<PageId> {
+    let mut victim = Option::None;
     let mut n_iterated = 0;
     // We do at best two sweeps. First sweep takes into account clock status
     // Second basically just automatically takes the first that isn't currently referenced
     while n_iterated < self.clock.len() * 2 && victim.is_none() {
       let mut element = &mut self.clock[self.clock_position];
-      if !element.clock_used {
+      if !element.clock_used && refcount_accessor.get_refcount(element.page_id) == 1 {
         victim = Option::Some(element.page_id);
       }
       element.clock_used = false;
