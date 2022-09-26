@@ -8,3 +8,8 @@ edition = "2021"
 [dependencies]
 bitvec = "1.0.0"
 byteorder = "1.4.3"
+
+[dev-dependencies]
+tempfile = "3"
+mockall = "0.11.2"
+rand = "0.8.5"
