@@ -1,4 +1,4 @@
-use std::{fs::File, path::PathBuf, io::{Seek, Read, SeekFrom, Write}, sync::{RwLock, Arc}};
+use std::{fs::{File, metadata}, path::PathBuf, io::{Seek, Read, SeekFrom, Write}, sync::{RwLock, Arc}};
 
 use super::page::{PAGE_SIZE, PageId, RelationIdType};
 
@@ -42,8 +42,8 @@ impl StorageManager for DiskManager {
     // TODO: It's not ideal that we open the file new each time. Think about caching but then
     // we need to make sure that we don't have races between seeks and read/writes
     let mut file = File::options()
-                                .create(true)
                                 .write(true)
+                                .create(true)
                                 .open(self.data_folder.read().unwrap()
                                   .join(page_id.relation_id.to_string()))
                                 .unwrap();
@@ -55,7 +55,12 @@ impl StorageManager for DiskManager {
   }
 
   fn get_relation_size(&self, relation_id: RelationIdType) -> u64 {
-    let file = File::options().open(self.data_folder.read().unwrap().join(relation_id.to_string())).unwrap();
-    file.metadata().unwrap().len() / PAGE_SIZE as u64
+    //TODO: It would be better to return 0 if the file doesn't exist instead of creating it
+    let path = self.data_folder.read().unwrap().join(relation_id.to_string());
+    if path.is_file(){
+      metadata(path.clone()).unwrap().len()
+    } else {
+      0
+    }
   }
 }

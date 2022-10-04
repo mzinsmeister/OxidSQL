@@ -60,6 +60,7 @@ impl Into<u64> for PageId {
 pub struct Page{
     pub data: Box<[u8]>,
     pub dirty: bool,
+    pub is_new: bool,
     pub id: Option<PageId>,
 }
 
@@ -67,6 +68,7 @@ impl Page {
     pub fn new() -> Page {
         let mut new_page = Page {
             dirty: false,
+            is_new: true,
             id: Option::None,
             data: Box::new([0; PAGE_SIZE])
         };

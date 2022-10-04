@@ -27,6 +27,7 @@ impl ClockReplacer {
 impl Replacer for ClockReplacer {
 
   fn find_victim(&mut self, refcount_accessor: &RefCountAccessor) -> Option<PageId> {
+    assert_eq!(self.clock.len(), self.page_clock_pos_mapping.len());
     let mut victim = Option::None;
     let mut n_iterated = 0;
     // We do at best two sweeps. First sweep takes into account clock status
@@ -40,20 +41,27 @@ impl Replacer for ClockReplacer {
       self.clock_position = (self.clock_position + 1) % self.clock.len();
       n_iterated += 1;
     }
+    assert_eq!(self.clock.len(), self.page_clock_pos_mapping.len());
     victim
   }
 
   fn load_page(&mut self, page: PageId) {
+    assert_eq!(self.clock.len(), self.page_clock_pos_mapping.len());
     // Where we add this really doesn't matter since this will really only ever happen
     // Before the buffer pool is full anyway which is before find_victim is called once anyway
     self.clock.push(ClockPageInfo { clock_used: true, page_id: page });
     self.page_clock_pos_mapping.insert(page, self.clock.len() - 1);
+    assert_eq!(self.clock.len(), self.page_clock_pos_mapping.len());
   }
 
   fn swap_pages(&mut self, old_page: PageId, new_page: PageId) {
+    assert_eq!(self.clock.len(), self.page_clock_pos_mapping.len());
     let pos = self.page_clock_pos_mapping.remove(&old_page).unwrap();
     self.clock[pos] = ClockPageInfo { page_id: new_page, clock_used: true };
-    self.page_clock_pos_mapping.insert(new_page, pos);
+    if self.page_clock_pos_mapping.insert(new_page, pos).is_some() {
+      panic!("clock already contained swapped page");
+    }
+    assert_eq!(self.clock.len(), self.page_clock_pos_mapping.len());
   }
   
   fn use_page(&mut self, page: PageId) {

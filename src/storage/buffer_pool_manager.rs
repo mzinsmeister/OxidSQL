@@ -2,6 +2,7 @@ use crate::storage::page::{Page};
 use std::collections::{HashMap};
 use std::error::Error;
 use std::fmt::Display;
+use std::io::{stdout, Stdout};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock, Mutex, MutexGuard};
 
@@ -18,7 +19,7 @@ pub struct BufferManager {
     // You only need one of them.
     pagetable: Mutex<PageTableType>,
     disk_manager: Box<dyn StorageManager>,
-    replacer: Mutex<Box<dyn Replacer>>,
+    replacer: Mutex<Box<dyn Replacer + Send>>,
     size: AtomicUsize
 }
 
@@ -55,7 +56,7 @@ impl Display for BufferManagerError {
 impl Error for BufferManagerError {}
 
 impl BufferManager {
-    pub fn new(disk_manager: Box<dyn StorageManager>, replacer: Box<dyn Replacer>, size: usize) -> BufferManager {
+    pub fn new(disk_manager: Box<dyn StorageManager>, replacer: Box<dyn Replacer + Send>, size: usize) -> BufferManager {
         return BufferManager {
             pagetable: Mutex::new(HashMap::new()),
             disk_manager,
@@ -93,20 +94,28 @@ impl BufferManager {
                     // locking it should under no circumstances block!
                     let mut page_write = page.try_write().expect("Locking replacer victim must not block!");
                     if page_write.dirty {
+                        drop(replacer);
                         drop(pagetable);
                         self.disk_manager.write_page(page_write.id.expect("Dirty page cannot be new page"), &page_write.data)?;
                         page_write.dirty = false;
+                        page_write.is_new = false;
                         pagetable = self.pagetable.lock().unwrap();
+                        replacer = self.replacer.lock().unwrap();
                     } 
                     // Check that only we and the pagetable have a reference (noone got one in the meantime if the page was dirty)
                     // We can't just remove the page from the pagetable before writing out to disk because otherwise someone else could
                     // Load it again with the old data
-                    if Arc::strong_count(&page) == 2 { 
+                    if Arc::strong_count(&page) == 2 {
+                        pagetable.remove(&victim);
+                        pagetable.insert(page_id, page.clone());
                         replacer.swap_pages(victim, page_id);
                         drop(replacer);
                         drop(pagetable);
                         if self.disk_manager.get_relation_size(page_id.relation_id) / PAGE_SIZE as u64 > page_id.offset_id {
                             self.disk_manager.read_page(page_id, &mut page_write.data)?;
+                            page_write.is_new = false
+                        } else {
+                            page_write.is_new = true;
                         }
                         page_write.id = Some(page_id);
                         drop(page_write);
@@ -171,10 +180,8 @@ impl Drop for BufferManager {
 #[cfg(test)]
 mod tests {
 
-    use std::{path::PathBuf, thread, sync::atomic::{AtomicUsize, AtomicU32, Ordering}};
-
-    use bitvec::{store::BitStore, macros::internal::funty::Numeric};
-    use rand::{SeedableRng, Rng};
+    use std::{path::PathBuf, thread::{self, JoinHandle}, sync::{atomic::{AtomicU32, Ordering}, Arc, RwLock}};
+    use rand::{Rng};
 
     use crate::storage::{disk::DiskManager, page::{PageId, PAGE_SIZE, Page}, clock_replacer::ClockReplacer, replacer::MockReplacer};
 
@@ -197,16 +204,17 @@ mod tests {
         let datadir_path = PathBuf::from(datadir.path());
         let disk_manager = DiskManager::new(datadir_path.clone());
         let bpm = BufferManager::new(Box::new(disk_manager), Box::new(ClockReplacer::new()), 10);
-        let page = bpm.get_page(PageId::new(1,1)).unwrap();
-        let mut page = page.try_write().unwrap();
-        fill_page(PageId::new(1,1), &mut page);
+        let page = bpm.get_page(PageId::new(1,0)).unwrap();
+        let mut page_write = page.try_write().unwrap();
+        fill_page(PageId::new(1,0), &mut page_write);
+        drop(page_write);
         drop(page);
         drop(bpm);
         let disk_manager = DiskManager::new(datadir_path);
         let bpm = BufferManager::new(Box::new(disk_manager), Box::new(ClockReplacer::new()), 10);
-        let page = bpm.get_page(PageId::new(1,1)).unwrap();
-        let page = page.try_read().unwrap();
-        assert_page(PageId::new(1, 1), &page)
+        let page = bpm.get_page(PageId::new(1,0)).unwrap();
+        let page_read = page.try_read().unwrap();
+        assert_page(PageId::new(1, 0), &page_read)
     }
 
     #[test]
@@ -255,52 +263,82 @@ mod tests {
     fn multithreaded_contention_test() {
         let datadir = tempfile::tempdir().unwrap();
         let disk_manager = DiskManager::new(datadir.into_path());
-        let bpm = BufferManager::new(Box::new(disk_manager), Box::new(ClockReplacer::new()), 100);
-        let page_counter = AtomicU32::new(0);
+        let bpm = Arc::new(BufferManager::new(Box::new(disk_manager), Box::new(ClockReplacer::new()), 100));
+        let page_counter = Arc::new(AtomicU32::new(0));
+        let pages: Arc<RwLock<Vec<PageId>>> = Arc::new(RwLock::new(Vec::new()));
+        let mut jhs: Vec<JoinHandle<()>> = Vec::new();
         for i in 0..20 {
-            thread::spawn(move || {
-                let rng: rand::rngs::StdRng = rand::SeedableRng::seed_from_u64(42 * i);
+            let bpm = bpm.clone();
+            let pages = pages.clone();
+            let page_counter = page_counter.clone();
+            jhs.push(thread::spawn(move || {
+                let mut rng: rand::rngs::StdRng = rand::SeedableRng::seed_from_u64(42 * i);
                 for j in 0..1000 {
-                    let r: u32 = rng.gen();
+                    let r: u64 = rng.gen();
                     if page_counter.load(Ordering::Relaxed) < 5 || r % 10 == 0 {
                         // create new
                         let next_offset_id = page_counter.fetch_add(1, Ordering::Relaxed) as u64;
-                        let page = bpm.get_page(PageId::new(1, next_offset_id)).unwrap();
-                        let page_write = page.write().unwrap();
-                        page_write.data[0..7].copy_from_slice(&next_offset_id.to_be_bytes());
+                        let page_id = PageId::new(1, next_offset_id);
+                        let page = bpm.get_page(page_id).unwrap();
+                        let mut page_write = page.write().unwrap();
+                        let mut pages_write = pages.write().unwrap();
+                        pages_write.push(page_id);
+                        drop(pages_write);
+                        let id_slice = next_offset_id.to_be_bytes();
+                        page_write.data[0..8].copy_from_slice(&id_slice);
+                        page_write.data[8..16].copy_from_slice(&r.to_be_bytes());
                         page_write.dirty = true;
                     }
                     if j % 3 == 0 {
                         // Write
-                        let page = bpm.get_page(PageId::new(1, (r % page_counter.load(Ordering::Relaxed)).into()));
-                        let page_write = page.write().unwrap();
-                        page_write.data[0..7].copy_from_slice(&next_offset_id.to_be_bytes());
+                        let pages_read = pages.read().unwrap();
+                        let page_id = pages_read.get(r as usize % pages_read.len()).unwrap().clone();
+                        drop(pages_read);
+                        let page = bpm.get_page(page_id).unwrap();
+                        let mut page_write = page.write().unwrap();
+                        let id_slice = page_id.offset_id.to_be_bytes();
+                        page_write.data[0..8].copy_from_slice(&id_slice);
+                        page_write.data[8..16].copy_from_slice(&r.to_be_bytes());
                         page_write.dirty = true;
                     } else {
                         // Read
+                        let pages_read = pages.read().unwrap();
+                        let page_id = pages_read.get(r as usize % pages_read.len()).unwrap().clone();
+                        drop(pages_read);
+                        let page = bpm.get_page(page_id).unwrap();
+                        let page_read = page.read().unwrap();
+                        let read_id = u64::from_be_bytes(page_read.data[0..8].try_into().unwrap());
+                        assert_eq!(read_id, page_id.offset_id);
                     }
                 }
-                bpm.get_page(page_id)
-            });
+            }));
         }
-        let page = bpm.get_page(PageId::new(1,1)).unwrap();
-        let page = page.try_read().unwrap();
+        for jh in jhs {
+            jh.join().unwrap();
+        }
+        for offset_id in 0..page_counter.load(Ordering::Acquire) as u64 {
+            let page_id = PageId::new(1, offset_id);
+            let page = bpm.get_page(page_id).unwrap();
+            let page_read = page.read().unwrap();
+            assert_eq!(u64::from_be_bytes(page_read.data[0..8].try_into().unwrap()), page_id.offset_id);
+        }
     }
 
     fn fill_page(page_id: PageId, page_write: &mut Page) {
-        page_write.data[0] = page_id.relation_id.to_be_bytes()[0];
-        page_write.data[1] = page_id.relation_id.to_be_bytes()[1];
-        page_write.data[2] = page_id.offset_id.to_be_bytes()[0];
-        page_write.data[3] = page_id.offset_id.to_be_bytes()[1];
-        page_write.data[4] = page_id.offset_id.to_be_bytes()[2];
-        page_write.data[5] = page_id.offset_id.to_be_bytes()[3];
-        page_write.data[6] = page_id.offset_id.to_be_bytes()[4];
-        page_write.data[7] = page_id.offset_id.to_be_bytes()[5];
-        page_write.data[8] = page_id.offset_id.to_be_bytes()[6];
-        page_write.data[9] = page_id.offset_id.to_be_bytes()[7];
-        page_write.data[100] = 123;
-        page_write.data[1000] = 234;
-        page_write.data[PAGE_SIZE - 1] = 21;
+        let page_data = &mut page_write.data;
+        page_data[0] = page_id.relation_id.to_be_bytes()[0];
+        page_data[1] = page_id.relation_id.to_be_bytes()[1];
+        page_data[2] = page_id.offset_id.to_be_bytes()[0];
+        page_data[3] = page_id.offset_id.to_be_bytes()[1];
+        page_data[4] = page_id.offset_id.to_be_bytes()[2];
+        page_data[5] = page_id.offset_id.to_be_bytes()[3];
+        page_data[6] = page_id.offset_id.to_be_bytes()[4];
+        page_data[7] = page_id.offset_id.to_be_bytes()[5];
+        page_data[8] = page_id.offset_id.to_be_bytes()[6];
+        page_data[9] = page_id.offset_id.to_be_bytes()[7];
+        page_data[100] = 123;
+        page_data[1000] = 234;
+        page_data[PAGE_SIZE - 1] = 21;
         page_write.dirty = true;
     }
 
