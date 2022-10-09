@@ -68,58 +68,59 @@ impl BufferManager {
     fn load(&self, page_id: PageId, pagetable: MutexGuard<PageTableType>) -> Result<PageType, BufferManagerError> {
         let mut pagetable = pagetable;
         let mut replacer = self.replacer.lock().unwrap();
-        if pagetable.len() < self.size.load(Ordering::Relaxed) {
-            let mut page_raw = Page::new();
-            page_raw.id = Some(page_id);
-            let page = Arc::new(RwLock::new(page_raw));
-            pagetable.insert(page_id, page.clone());
+        let new_page = Arc::new(RwLock::new(Page::new()));
+        let mut new_page_write = new_page.try_write().unwrap();
+        new_page_write.id = Some(page_id);
+        pagetable.insert(page_id, new_page.clone());
+        if pagetable.len() <= self.size.load(Ordering::Relaxed) {
             replacer.load_page(page_id);
             drop(replacer);
-            let mut page_write = page.try_write().expect("new page must not block on locking");
             drop(pagetable);
+            new_page_write.data = Box::new([0; PAGE_SIZE]);
             if self.disk_manager.get_relation_size(page_id.relation_id) / PAGE_SIZE as u64 > page_id.offset_id {
-                self.disk_manager.read_page(page_id, &mut page_write.data)?;
+                self.disk_manager.read_page(page_id, &mut new_page_write.data)?;
             }
-            drop(page_write);
-            return Ok(page);     
+            drop(new_page_write);
+            return Ok(new_page);     
         } else {
-            let mut page;
             loop {
                 let refcount_accessor = RefCountAccessor { pagetable: &&pagetable };
                 let victim_opt = replacer.find_victim(&refcount_accessor);
                 drop(refcount_accessor);
                 if let Some(victim) = victim_opt {
-                    page = pagetable[&victim].clone();
+                    let victim_page = pagetable[&victim].clone();
                     // Since the replacer has to make sure there's only one reference to the page
                     // locking it should under no circumstances block!
-                    let mut page_write = page.try_write().expect("Locking replacer victim must not block!");
-                    if page_write.dirty {
+                    let mut victim_page_write = victim_page.try_write().expect("Locking replacer victim must not block!");
+                    if victim_page_write.dirty {
                         drop(replacer);
                         drop(pagetable);
-                        self.disk_manager.write_page(page_write.id.expect("Dirty page cannot be new page"), &page_write.data)?;
-                        page_write.dirty = false;
-                        page_write.is_new = false;
+                        self.disk_manager.write_page(victim_page_write.id.expect("Dirty page cannot be new page"), &victim_page_write.data)?;
+                        victim_page_write.dirty = false;
+                        victim_page_write.is_new = false;
                         pagetable = self.pagetable.lock().unwrap();
                         replacer = self.replacer.lock().unwrap();
                     } 
                     // Check that only we and the pagetable have a reference (noone got one in the meantime if the page was dirty)
                     // We can't just remove the page from the pagetable before writing out to disk because otherwise someone else could
                     // Load it again with the old data
-                    if Arc::strong_count(&page) == 2 {
+                    assert!(Arc::strong_count(&victim_page) >= 2);
+                    if Arc::strong_count(&victim_page) == 2 {
+                        drop(victim_page_write);
                         pagetable.remove(&victim);
-                        pagetable.insert(page_id, page.clone());
                         replacer.swap_pages(victim, page_id);
+                        drop(victim_page);
                         drop(replacer);
                         drop(pagetable);
+                        new_page_write.data = Box::new([0; PAGE_SIZE]);
                         if self.disk_manager.get_relation_size(page_id.relation_id) / PAGE_SIZE as u64 > page_id.offset_id {
-                            self.disk_manager.read_page(page_id, &mut page_write.data)?;
-                            page_write.is_new = false
+                            self.disk_manager.read_page(page_id, &mut new_page_write.data)?;
+                            new_page_write.is_new = false
                         } else {
-                            page_write.is_new = true;
+                            new_page_write.is_new = true;
                         }
-                        page_write.id = Some(page_id);
-                        drop(page_write);
-                        return Ok(page);
+                        drop(new_page_write);
+                        return Ok(new_page);
                     }
                 } else {
                     return Err(BufferManagerError::NoBufferFrameAvailable);
@@ -145,7 +146,12 @@ impl BufferManager {
         } else {
             self.load(page_id, pagetable)?
         };
-        self.replacer.lock().unwrap().use_page(page_id);
+        // TODO: HACK(kinda): To avoid key not found panics for new pages that are currently beeing loaded
+        //       we currently only set the used flag if the page is actually there
+        let mut replacer = self.replacer.lock().unwrap();
+        if replacer.has_page(page_id) {
+            replacer.use_page(page_id);
+        }
         Ok(page)
     }
 
@@ -181,6 +187,7 @@ impl Drop for BufferManager {
 mod tests {
 
     use std::{path::PathBuf, thread::{self, JoinHandle}, sync::{atomic::{AtomicU32, Ordering}, Arc, RwLock}};
+    use mockall::Sequence;
     use rand::{Rng};
 
     use crate::storage::{disk::DiskManager, page::{PageId, PAGE_SIZE, Page}, clock_replacer::ClockReplacer, replacer::MockReplacer};
@@ -227,6 +234,7 @@ mod tests {
         replacer_mock.expect_load_page().return_const(());
         replacer_mock.expect_use_page().return_const(());
         replacer_mock.expect_swap_pages().return_const(());
+        replacer_mock.expect_has_page().return_const(true);
         let bpm = BufferManager::new(Box::new(disk_manager), Box::new(replacer_mock), 1);
         bpm.get_page(PageId::new(1,1)).unwrap();
         bpm.get_page(PageId::new(1, 2)).unwrap();
@@ -241,20 +249,24 @@ mod tests {
         let datadir_path = PathBuf::from(datadir.path());
         let disk_manager = DiskManager::new(datadir_path);
         let mut replacer_mock = MockReplacer::new();
-        replacer_mock.expect_find_victim().return_const(PageId::new(1, 1));
+        replacer_mock.expect_find_victim().times(1)
+            .return_const(PageId::new(1, 1));
+        replacer_mock.expect_find_victim()
+            .return_const(PageId::new(1, 2));
         replacer_mock.expect_load_page().return_const(());
         replacer_mock.expect_use_page().return_const(());
         replacer_mock.expect_swap_pages().return_const(());
+        replacer_mock.expect_has_page().return_const(true);
         let bpm = BufferManager::new(Box::new(disk_manager), Box::new(replacer_mock), 1);
         let page = bpm.get_page(PageId::new(1,1)).unwrap();
         let mut page_write = page.try_write().unwrap();
-        fill_page(PageId::new(1, 2), &mut page_write);
+        fill_page(PageId::new(1, 1), &mut page_write);
         drop(page_write);
         drop(page);
         bpm.get_page(PageId::new(1, 2)).unwrap();
         let page = bpm.get_page(PageId::new(1,1)).unwrap();
-        let page = page.try_read().unwrap();
-        assert_page(PageId::new(1, 2), &page);
+        let page_read = page.try_read().unwrap();
+        assert_page(PageId::new(1, 1), &page_read);
     }
 
 

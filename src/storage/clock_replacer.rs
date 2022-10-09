@@ -69,6 +69,10 @@ impl Replacer for ClockReplacer {
     self.clock[pos].clock_used = true;
   }
 
+  fn has_page(&self, page: PageId) -> bool {
+    self.page_clock_pos_mapping.contains_key(&page)
+  }
+
   fn clear(&mut self) {
     self.page_clock_pos_mapping = HashMap::new();
     self.clock = Vec::new();

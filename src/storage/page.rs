@@ -66,13 +66,12 @@ pub struct Page{
 
 impl Page {
     pub fn new() -> Page {
-        let mut new_page = Page {
+        Page {
             dirty: false,
             is_new: true,
             id: Option::None,
-            data: Box::new([0; PAGE_SIZE])
-        };
-        new_page
+            data: Box::new([])
+        }
     }
 
     pub fn get_u16(&self, pos: usize) -> u16 {
