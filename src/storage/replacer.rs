@@ -7,7 +7,7 @@ use mockall::automock;
 
 #[cfg_attr(test, automock)]
 pub trait Replacer {
-  fn find_victim<'a>(&mut self, refcount_accessor: &'a RefCountAccessor<'a>) -> Option<PageId>;
+  fn find_victim<'a>(&mut self, refcount_accessor: &dyn RefCountAccessor) -> Option<PageId>;
   fn use_page(&mut self, page_id: PageId);
   fn has_page(&self, page_id: PageId) -> bool;
   fn load_page(&mut self, page_id: PageId);

@@ -26,7 +26,7 @@ impl ClockReplacer {
 
 impl Replacer for ClockReplacer {
 
-  fn find_victim(&mut self, refcount_accessor: &RefCountAccessor) -> Option<PageId> {
+  fn find_victim(&mut self, refcount_accessor: &dyn RefCountAccessor) -> Option<PageId> {
     assert_eq!(self.clock.len(), self.page_clock_pos_mapping.len());
     let mut victim = Option::None;
     let mut n_iterated = 0;
@@ -77,5 +77,97 @@ impl Replacer for ClockReplacer {
     self.page_clock_pos_mapping = HashMap::new();
     self.clock = Vec::new();
     self.clock_position = 0;
+  }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::RefCell, sync::{Arc, RwLock}};
+
+    use mockall::predicate;
+
+    use crate::storage::{buffer_pool_manager::{PageTableType, RefCountAccessor, MockRefCountAccessor}, page::Page};
+
+
+  #[test]
+  fn single_page_test() {
+    use crate::storage::{replacer::Replacer, page::PageId};
+
+    use super::ClockReplacer;
+
+    let mut testee = ClockReplacer::new();
+    testee.load_page(PageId::new(1, 1));
+    assert!(testee.has_page(PageId::new(1,1)), "Replacer should have page now");
+  }
+
+  #[test]
+  fn swap_pages_test() {
+    use crate::storage::{replacer::Replacer, page::PageId};
+
+    use super::ClockReplacer;
+
+    let mut testee = ClockReplacer::new();
+    testee.load_page(PageId::new(1, 1));
+    testee.swap_pages(PageId::new(1,1), PageId::new(2, 2));
+    assert!(!testee.has_page(PageId::new(1, 1)), "Replacer should no longer have old page");
+    assert!(testee.has_page(PageId::new(2, 2)), "Replacer should have page now");
+  }
+
+  #[test]
+  fn find_victim_single_test() {
+    use crate::storage::{replacer::Replacer, page::PageId};
+
+    use super::ClockReplacer;
+
+    let mut testee = ClockReplacer::new();
+    testee.load_page(PageId::new(1, 1));
+    let mut refcount_accessor = MockRefCountAccessor::new();
+    refcount_accessor.expect_get_refcount().with(predicate::eq(PageId::new(1, 1))).return_const(1usize);
+    assert_eq!(testee.find_victim(&refcount_accessor), Some(PageId::new(1, 1)));
+  }
+
+
+  #[test]
+  fn find_victim_multiple_test() {
+    use crate::storage::{replacer::Replacer, page::PageId};
+
+    use super::ClockReplacer;
+
+    let mut testee = ClockReplacer::new();
+    let page_id = PageId::new(1, 1);
+    testee.load_page(page_id);
+    let page_id = PageId::new(1, 2);
+    testee.load_page(page_id);
+    let page_id = PageId::new(2, 3);
+    testee.load_page(page_id);
+    let mut refcount_accessor = MockRefCountAccessor::new();
+    refcount_accessor.expect_get_refcount().with(predicate::eq(PageId::new(1, 1))).return_const(1usize);
+    refcount_accessor.expect_get_refcount().with(predicate::eq(PageId::new(1, 2))).return_const(1usize);
+    refcount_accessor.expect_get_refcount().with(predicate::eq(PageId::new(2, 3))).return_const(1usize);
+    assert_eq!(testee.find_victim(&refcount_accessor), Some(PageId::new(1, 1)));
+    assert_eq!(testee.find_victim(&refcount_accessor), Some(PageId::new(1, 2)));
+    assert_eq!(testee.find_victim(&refcount_accessor), Some(PageId::new(2, 3)));
+  }
+
+  #[test]
+  fn find_victim_multiple_with_references_test() {
+    use crate::storage::{replacer::Replacer, page::PageId};
+
+    use super::ClockReplacer;
+
+    let mut testee = ClockReplacer::new();
+    let page_id = PageId::new(1, 1);
+    testee.load_page(page_id);
+    let page_id = PageId::new(1, 2);
+    testee.load_page(page_id);
+    let page_id = PageId::new(2, 3);
+    testee.load_page(page_id);
+    let mut refcount_accessor = MockRefCountAccessor::new();
+    refcount_accessor.expect_get_refcount().with(predicate::eq(PageId::new(1, 1))).return_const(2usize);
+    refcount_accessor.expect_get_refcount().with(predicate::eq(PageId::new(1, 2))).return_const(1usize);
+    refcount_accessor.expect_get_refcount().with(predicate::eq(PageId::new(2, 3))).return_const(1usize);
+    assert_eq!(testee.find_victim(&refcount_accessor), Some(PageId::new(1, 2)));
+    assert_eq!(testee.find_victim(&refcount_accessor), Some(PageId::new(2, 3)));
+    assert_eq!(testee.find_victim(&refcount_accessor), Some(PageId::new(1, 2)));
   }
 }

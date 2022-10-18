@@ -23,12 +23,20 @@ pub struct BufferManager {
     size: AtomicUsize
 }
 
-pub struct RefCountAccessor<'a> {
+#[cfg(test)]
+use mockall::automock;
+
+#[cfg_attr(test, automock)]
+pub trait RefCountAccessor {
+    fn get_refcount(&self, page_id: PageId) -> usize;
+}
+
+pub struct RefCountAccessorImpl<'a> {
     pagetable: &'a PageTableType
 }
 
-impl<'a> RefCountAccessor<'a> {
-    pub fn get_refcount(&self, page_id: PageId) -> usize {
+impl<'a> RefCountAccessor for RefCountAccessorImpl<'a> {
+    fn get_refcount(&self, page_id: PageId) -> usize {
         Arc::strong_count(&self.pagetable[&page_id])
     }
 }
@@ -84,7 +92,7 @@ impl BufferManager {
             return Ok(new_page);     
         } else {
             loop {
-                let refcount_accessor = RefCountAccessor { pagetable: &&pagetable };
+                let refcount_accessor = RefCountAccessorImpl { pagetable: &&pagetable };
                 let victim_opt = replacer.find_victim(&refcount_accessor);
                 drop(refcount_accessor);
                 if let Some(victim) = victim_opt {
