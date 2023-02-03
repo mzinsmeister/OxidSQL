@@ -1,6 +1,6 @@
 use std::{collections::HashMap};
 
-use super::{page::PageId, replacer::Replacer, buffer_pool_manager::RefCountAccessor};
+use super::{page::PageId, replacer::Replacer, buffer_manager::RefCountAccessor};
 
 
 struct ClockPageInfo {
@@ -86,7 +86,7 @@ mod tests {
 
     use mockall::predicate;
 
-    use crate::storage::{buffer_pool_manager::{PageTableType, RefCountAccessor, MockRefCountAccessor}, page::Page};
+    use crate::storage::{buffer_manager::{PageTableType, RefCountAccessor, MockRefCountAccessor}, page::Page};
 
 
   #[test]

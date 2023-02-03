@@ -1,6 +1,6 @@
 use std::option::Option;
 
-use super::{page::PageId, buffer_pool_manager::RefCountAccessor};
+use super::{page::PageId, buffer_manager::RefCountAccessor};
 
 #[cfg(test)]
 use mockall::automock;

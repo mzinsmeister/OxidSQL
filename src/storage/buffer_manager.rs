@@ -2,7 +2,6 @@ use crate::storage::page::{Page};
 use std::collections::{HashMap};
 use std::error::Error;
 use std::fmt::Display;
-use std::io::{stdout, Stdout};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock, Mutex, MutexGuard};
 
