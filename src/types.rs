@@ -1,8 +1,21 @@
-use crate::storage::page::PageId;
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TID {
-    page_id: PageId,
+pub struct RelationTID {
+    page_id: u64, // only current segment (48 bits max)
     slot_id: u16
+}
+
+impl From<u64> for RelationTID {
+    fn from(input: u64) -> Self {
+        Self { 
+            page_id: input >> 16,
+            slot_id: (input & ((1u64 << 16) - 1)) as u16
+        }
+    }
+}
+
+impl From<&RelationTID> for u64 {
+    fn from(input: &RelationTID) -> u64 {
+        (input.page_id << 16) | (input.slot_id as u64)
+    }
 }

@@ -1,4 +1,4 @@
-use crate::storage::page::{Page};
+use crate::storage::page::{Page, PageState};
 use std::collections::{HashMap};
 use std::error::Error;
 use std::fmt::Display;
@@ -84,7 +84,7 @@ impl BufferManager {
             drop(replacer);
             drop(pagetable);
             new_page_write.data = Box::new([0; PAGE_SIZE]);
-            if self.disk_manager.get_relation_size(page_id.relation_id) / PAGE_SIZE as u64 > page_id.offset_id {
+            if self.disk_manager.get_relation_size(page_id.segment_id) / PAGE_SIZE as u64 > page_id.offset_id {
                 self.disk_manager.read_page(page_id, &mut new_page_write.data)?;
             }
             drop(new_page_write);
@@ -99,12 +99,11 @@ impl BufferManager {
                     // Since the replacer has to make sure there's only one reference to the page
                     // locking it should under no circumstances block!
                     let mut victim_page_write = victim_page.try_write().expect("Locking replacer victim must not block!");
-                    if victim_page_write.dirty {
+                    if victim_page_write.state == PageState::DIRTY {
                         drop(replacer);
                         drop(pagetable);
                         self.disk_manager.write_page(victim_page_write.id.expect("Dirty page cannot be new page"), &victim_page_write.data)?;
-                        victim_page_write.dirty = false;
-                        victim_page_write.is_new = false;
+                        victim_page_write.state = PageState::CLEAN;
                         pagetable = self.pagetable.lock().unwrap();
                         replacer = self.replacer.lock().unwrap();
                     } 
@@ -120,11 +119,11 @@ impl BufferManager {
                         drop(replacer);
                         drop(pagetable);
                         new_page_write.data = Box::new([0; PAGE_SIZE]);
-                        if self.disk_manager.get_relation_size(page_id.relation_id) / PAGE_SIZE as u64 > page_id.offset_id {
+                        if self.disk_manager.get_relation_size(page_id.segment_id) / PAGE_SIZE as u64 > page_id.offset_id {
                             self.disk_manager.read_page(page_id, &mut new_page_write.data)?;
-                            new_page_write.is_new = false
+                            new_page_write.state = PageState::CLEAN;
                         } else {
-                            new_page_write.is_new = true;
+                            new_page_write.state = PageState::NEW;
                         }
                         drop(new_page_write);
                         return Ok(new_page);
@@ -162,8 +161,8 @@ impl BufferManager {
         Ok(page)
     }
 
-    pub fn get_total_num_pages(&self, relation_id: RelationIdType) -> u64 {
-        self.disk_manager.get_relation_size(relation_id)
+    pub fn get_total_num_pages(&self, segment_id: RelationIdType) -> u64 {
+        self.disk_manager.get_relation_size(segment_id)
     }
 
     pub fn flush(&mut self) -> Result<(), BufferManagerError> {
@@ -172,9 +171,9 @@ impl BufferManager {
         for (_, page) in pagetable.iter() {
             let mut page = page.write().unwrap();
             if let Some(id) = page.id {
-                if page.dirty {
+                if page.state.is_dirtyish() {
                     self.disk_manager.write_page(id, &page.data)?;
-                    page.dirty = false;
+                    page.state = PageState::CLEAN;
                 }
             }
         }
@@ -194,10 +193,9 @@ impl Drop for BufferManager {
 mod tests {
 
     use std::{path::PathBuf, thread::{self, JoinHandle}, sync::{atomic::{AtomicU32, Ordering}, Arc, RwLock}};
-    use mockall::Sequence;
     use rand::{Rng};
 
-    use crate::storage::{disk::DiskManager, page::{PageId, PAGE_SIZE, Page}, clock_replacer::ClockReplacer, replacer::MockReplacer};
+    use crate::storage::{disk::DiskManager, page::{PageId, PAGE_SIZE, Page, PageState}, clock_replacer::ClockReplacer, replacer::MockReplacer};
 
     use super::BufferManager;
 
@@ -208,7 +206,7 @@ mod tests {
         let bpm = BufferManager::new(Box::new(disk_manager), Box::new(ClockReplacer::new()), 10);
         let page = bpm.get_page(PageId::new(1,1)).unwrap();
         let page = page.try_read().unwrap();
-        assert_eq!(page.dirty, false);
+        assert_eq!(page.state, PageState::NEW);
         assert_eq!(page.data.len(), PAGE_SIZE);
     }
 
@@ -306,7 +304,7 @@ mod tests {
                         let id_slice = next_offset_id.to_be_bytes();
                         page_write.data[0..8].copy_from_slice(&id_slice);
                         page_write.data[8..16].copy_from_slice(&r.to_be_bytes());
-                        page_write.dirty = true;
+                        page_write.state = PageState::DIRTY;
                     }
                     if j % 3 == 0 {
                         // Write
@@ -318,7 +316,7 @@ mod tests {
                         let id_slice = page_id.offset_id.to_be_bytes();
                         page_write.data[0..8].copy_from_slice(&id_slice);
                         page_write.data[8..16].copy_from_slice(&r.to_be_bytes());
-                        page_write.dirty = true;
+                        page_write.state = PageState::DIRTY;
                     } else {
                         // Read
                         let pages_read = pages.read().unwrap();
@@ -345,8 +343,8 @@ mod tests {
 
     fn fill_page(page_id: PageId, page_write: &mut Page) {
         let page_data = &mut page_write.data;
-        page_data[0] = page_id.relation_id.to_be_bytes()[0];
-        page_data[1] = page_id.relation_id.to_be_bytes()[1];
+        page_data[0] = page_id.segment_id.to_be_bytes()[0];
+        page_data[1] = page_id.segment_id.to_be_bytes()[1];
         page_data[2] = page_id.offset_id.to_be_bytes()[0];
         page_data[3] = page_id.offset_id.to_be_bytes()[1];
         page_data[4] = page_id.offset_id.to_be_bytes()[2];
@@ -358,12 +356,12 @@ mod tests {
         page_data[100] = 123;
         page_data[1000] = 234;
         page_data[PAGE_SIZE - 1] = 21;
-        page_write.dirty = true;
+        page_write.state = PageState::DIRTY;
     }
 
     fn assert_page(page_id: PageId, page: &Page) {
-        assert_eq!(page.data[0], page_id.relation_id.to_be_bytes()[0]);
-        assert_eq!(page.data[1], page_id.relation_id.to_be_bytes()[1]);
+        assert_eq!(page.data[0], page_id.segment_id.to_be_bytes()[0]);
+        assert_eq!(page.data[1], page_id.segment_id.to_be_bytes()[1]);
         assert_eq!(page.data[2], page_id.offset_id.to_be_bytes()[0]);
         assert_eq!(page.data[3], page_id.offset_id.to_be_bytes()[1]);
         assert_eq!(page.data[4], page_id.offset_id.to_be_bytes()[2]);

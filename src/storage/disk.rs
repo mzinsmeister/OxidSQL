@@ -8,10 +8,10 @@ use mockall::{automock};
 
 #[cfg_attr(test, automock)]
 pub trait StorageManager: Sync + Send {
-  fn create_relation(&self, relation_id: RelationIdType);
+  fn create_relation(&self, segment_id: RelationIdType);
   fn read_page(&self, page_id: PageId, buf: &mut[u8]) -> Result<(), std::io::Error>;
   fn write_page(&self, page_id: PageId, buf: &[u8]) -> Result<(), std::io::Error>;
-  fn get_relation_size(&self, relation_id: RelationIdType) -> u64;
+  fn get_relation_size(&self, segment_id: RelationIdType) -> u64;
 }
 
 pub(super) struct DiskManager {
@@ -26,12 +26,12 @@ impl DiskManager {
 
 impl StorageManager for DiskManager {
 
-  fn create_relation(&self, relation_id: RelationIdType) {
-    File::create(self.data_folder.read().unwrap().join(relation_id.to_string())).unwrap();
+  fn create_relation(&self, segment_id: RelationIdType) {
+    File::create(self.data_folder.read().unwrap().join(segment_id.to_string())).unwrap();
   }
 
   fn read_page(&self, page_id: PageId, buf: &mut[u8]) -> Result<(), std::io::Error> {
-    let mut file = File::options().read(true).open(self.data_folder.read().unwrap().join(page_id.relation_id.to_string())).unwrap();
+    let mut file = File::options().read(true).open(self.data_folder.read().unwrap().join(page_id.segment_id.to_string())).unwrap();
     let offset = page_id.offset_id as u64 * PAGE_SIZE as u64;
     file.seek(SeekFrom::Start(offset))?;
     file.read_exact(buf)?;
@@ -45,7 +45,7 @@ impl StorageManager for DiskManager {
                                 .write(true)
                                 .create(true)
                                 .open(self.data_folder.read().unwrap()
-                                  .join(page_id.relation_id.to_string()))
+                                  .join(page_id.segment_id.to_string()))
                                 .unwrap();
     let offset = page_id.offset_id as u64 * PAGE_SIZE as u64;
     file.seek(SeekFrom::Start(offset))?;
@@ -54,9 +54,9 @@ impl StorageManager for DiskManager {
     Ok(())
   }
 
-  fn get_relation_size(&self, relation_id: RelationIdType) -> u64 {
+  fn get_relation_size(&self, segment_id: RelationIdType) -> u64 {
     //TODO: It would be better to return 0 if the file doesn't exist instead of creating it
-    let path = self.data_folder.read().unwrap().join(relation_id.to_string());
+    let path = self.data_folder.read().unwrap().join(segment_id.to_string());
     if path.is_file(){
       metadata(path.clone()).unwrap().len()
     } else {
