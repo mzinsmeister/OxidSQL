@@ -1,11 +1,14 @@
-use std::{collections::HashMap};
+use std::{collections::HashMap, sync::{Arc, RwLock}};
 
-use super::{page::PageId, replacer::Replacer, buffer_manager::RefCountAccessor};
+use crate::storage::replacer::can_page_be_replaced;
+
+use super::{page::{PageId, Page}, replacer::Replacer, buffer_manager::PageType};
 
 
 struct ClockPageInfo {
   clock_used: bool,
-  page_id: PageId
+  page_id: PageId,
+  page: PageType
 }
 
 pub(super) struct ClockReplacer {
@@ -26,7 +29,7 @@ impl ClockReplacer {
 
 impl Replacer for ClockReplacer {
 
-  fn find_victim(&mut self, refcount_accessor: &dyn RefCountAccessor) -> Option<PageId> {
+  fn find_victim(&mut self) -> Option<PageId> {
     assert_eq!(self.clock.len(), self.page_clock_pos_mapping.len());
     let mut victim = Option::None;
     let mut n_iterated = 0;
@@ -34,7 +37,7 @@ impl Replacer for ClockReplacer {
     // Second basically just automatically takes the first that isn't currently referenced
     while n_iterated < self.clock.len() * 2 && victim.is_none() {
       let mut element = &mut self.clock[self.clock_position];
-      if !element.clock_used && refcount_accessor.get_refcount(element.page_id) == 1 {
+      if !element.clock_used && can_page_be_replaced(&element.page) {
         victim = Option::Some(element.page_id);
       }
       element.clock_used = false;
@@ -45,20 +48,20 @@ impl Replacer for ClockReplacer {
     victim
   }
 
-  fn load_page(&mut self, page: PageId) {
+  fn load_page(&mut self, page_id: PageId, page: PageType) {
     assert_eq!(self.clock.len(), self.page_clock_pos_mapping.len());
     // Where we add this really doesn't matter since this will really only ever happen
     // Before the buffer pool is full anyway which is before find_victim is called once anyway
-    self.clock.push(ClockPageInfo { clock_used: true, page_id: page });
-    self.page_clock_pos_mapping.insert(page, self.clock.len() - 1);
+    self.clock.push(ClockPageInfo { clock_used: true, page_id: page_id, page});
+    self.page_clock_pos_mapping.insert(page_id, self.clock.len() - 1);
     assert_eq!(self.clock.len(), self.page_clock_pos_mapping.len());
   }
 
-  fn swap_pages(&mut self, old_page: PageId, new_page: PageId) {
+  fn swap_pages(&mut self, old_page_id: PageId, new_page_id: PageId, new_page: Arc<RwLock<Page>>) {
     assert_eq!(self.clock.len(), self.page_clock_pos_mapping.len());
-    let pos = self.page_clock_pos_mapping.remove(&old_page).unwrap();
-    self.clock[pos] = ClockPageInfo { page_id: new_page, clock_used: true };
-    if self.page_clock_pos_mapping.insert(new_page, pos).is_some() {
+    let pos = self.page_clock_pos_mapping.remove(&old_page_id).unwrap();
+    self.clock[pos] = ClockPageInfo { page_id: new_page_id, page: new_page, clock_used: true };
+    if self.page_clock_pos_mapping.insert(new_page_id, pos).is_some() {
       panic!("clock already contained swapped page");
     }
     assert_eq!(self.clock.len(), self.page_clock_pos_mapping.len());
@@ -82,11 +85,9 @@ impl Replacer for ClockReplacer {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, sync::{Arc, RwLock}};
+    use std::sync::{Arc, RwLock};
 
-    use mockall::predicate;
-
-    use crate::storage::{buffer_manager::{PageTableType, RefCountAccessor, MockRefCountAccessor}, page::Page};
+    use crate::storage::page::Page;
 
 
   #[test]
@@ -96,7 +97,8 @@ mod tests {
     use super::ClockReplacer;
 
     let mut testee = ClockReplacer::new();
-    testee.load_page(PageId::new(1, 1));
+    let page: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new()));
+    testee.load_page(PageId::new(1, 1), page.clone());
     assert!(testee.has_page(PageId::new(1,1)), "Replacer should have page now");
   }
 
@@ -107,8 +109,10 @@ mod tests {
     use super::ClockReplacer;
 
     let mut testee = ClockReplacer::new();
-    testee.load_page(PageId::new(1, 1));
-    testee.swap_pages(PageId::new(1,1), PageId::new(2, 2));
+    let page: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new()));
+    testee.load_page(PageId::new(1, 1), page.clone());
+    let page2: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new()));
+    testee.swap_pages(PageId::new(1,1), PageId::new(2, 2), page2.clone());
     assert!(!testee.has_page(PageId::new(1, 1)), "Replacer should no longer have old page");
     assert!(testee.has_page(PageId::new(2, 2)), "Replacer should have page now");
   }
@@ -120,10 +124,9 @@ mod tests {
     use super::ClockReplacer;
 
     let mut testee = ClockReplacer::new();
-    testee.load_page(PageId::new(1, 1));
-    let mut refcount_accessor = MockRefCountAccessor::new();
-    refcount_accessor.expect_get_refcount().with(predicate::eq(PageId::new(1, 1))).return_const(1usize);
-    assert_eq!(testee.find_victim(&refcount_accessor), Some(PageId::new(1, 1)));
+    let page: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new()));
+    testee.load_page(PageId::new(1, 1), page.clone());
+    assert_eq!(testee.find_victim(), Some(PageId::new(1, 1)));
   }
 
 
@@ -135,18 +138,17 @@ mod tests {
 
     let mut testee = ClockReplacer::new();
     let page_id = PageId::new(1, 1);
-    testee.load_page(page_id);
+    let page1: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new()));
+    testee.load_page(page_id, page1.clone());
     let page_id = PageId::new(1, 2);
-    testee.load_page(page_id);
+    let page2: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new()));
+    testee.load_page(page_id, page2.clone());
     let page_id = PageId::new(2, 3);
-    testee.load_page(page_id);
-    let mut refcount_accessor = MockRefCountAccessor::new();
-    refcount_accessor.expect_get_refcount().with(predicate::eq(PageId::new(1, 1))).return_const(1usize);
-    refcount_accessor.expect_get_refcount().with(predicate::eq(PageId::new(1, 2))).return_const(1usize);
-    refcount_accessor.expect_get_refcount().with(predicate::eq(PageId::new(2, 3))).return_const(1usize);
-    assert_eq!(testee.find_victim(&refcount_accessor), Some(PageId::new(1, 1)));
-    assert_eq!(testee.find_victim(&refcount_accessor), Some(PageId::new(1, 2)));
-    assert_eq!(testee.find_victim(&refcount_accessor), Some(PageId::new(2, 3)));
+    let page3: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new()));
+    testee.load_page(page_id, page3.clone());
+    assert_eq!(testee.find_victim(), Some(PageId::new(1, 1)));
+    assert_eq!(testee.find_victim(), Some(PageId::new(1, 2)));
+    assert_eq!(testee.find_victim(), Some(PageId::new(2, 3)));
   }
 
   #[test]
@@ -157,17 +159,18 @@ mod tests {
 
     let mut testee = ClockReplacer::new();
     let page_id = PageId::new(1, 1);
-    testee.load_page(page_id);
+    let page1: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new()));
+    testee.load_page(page_id, page1.clone());
     let page_id = PageId::new(1, 2);
-    testee.load_page(page_id);
+    let page2: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new()));
+    testee.load_page(page_id, page2.clone());
     let page_id = PageId::new(2, 3);
-    testee.load_page(page_id);
-    let mut refcount_accessor = MockRefCountAccessor::new();
-    refcount_accessor.expect_get_refcount().with(predicate::eq(PageId::new(1, 1))).return_const(2usize);
-    refcount_accessor.expect_get_refcount().with(predicate::eq(PageId::new(1, 2))).return_const(1usize);
-    refcount_accessor.expect_get_refcount().with(predicate::eq(PageId::new(2, 3))).return_const(1usize);
-    assert_eq!(testee.find_victim(&refcount_accessor), Some(PageId::new(1, 2)));
-    assert_eq!(testee.find_victim(&refcount_accessor), Some(PageId::new(2, 3)));
-    assert_eq!(testee.find_victim(&refcount_accessor), Some(PageId::new(1, 2)));
+    let page3: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new()));
+    testee.load_page(page_id, page3.clone());
+
+    let page1_2 = page1.clone();
+    assert_eq!(testee.find_victim(), Some(PageId::new(1, 2)));
+    assert_eq!(testee.find_victim(), Some(PageId::new(2, 3)));
+    assert_eq!(testee.find_victim(), Some(PageId::new(1, 2)));
   }
 }
