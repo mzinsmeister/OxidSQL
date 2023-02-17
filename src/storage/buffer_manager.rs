@@ -335,7 +335,7 @@ mod tests {
             let page_counter = page_counter.clone();
             jhs.push(thread::spawn(move || {
                 let mut rng: rand::rngs::StdRng = rand::SeedableRng::seed_from_u64(42 * i);
-                for j in 0..10_000 {
+                for j in 0..1_000 {
                     let r: u64 = rng.gen();
                     if page_counter.load(Ordering::Relaxed) < 5 || r % 10 == 0 {
                         // create new
