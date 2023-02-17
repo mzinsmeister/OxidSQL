@@ -356,10 +356,19 @@ impl SlottedPageMut<'_> {
         let mut new_data_start = self.page.data.len() as u32;
         for (offset, slot) in offset_slot_map.iter() {
             new_data_start = new_data_start - slot.length;
-            self.page.data[new_data_start as usize..new_data_start as usize + slot.length as usize].copy_from_slice(&self.page.data[*offset..*offset + slot.length as usize]);
+            self.page.data.copy_within(*offset..*offset + slot.length as usize, new_data_start as usize);
             let new_slot = Slot::new(new_data_start, slot.length);
             self.write_slot(slot.slot_id, &new_slot);
         }
         self.set_data_start(new_data_start);
+    }
+}
+
+#[cfg(test)]
+mod test {
+    
+    #[test]
+    fn first_header() {
+        // TODO
     }
 }

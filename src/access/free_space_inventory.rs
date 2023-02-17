@@ -166,3 +166,12 @@ impl FreeSpaceSegment {
         decoded as usize
     }
 }
+
+
+mod test {
+    
+    #[test]
+    fn first_cache() {
+        // TODO
+    }
+}
