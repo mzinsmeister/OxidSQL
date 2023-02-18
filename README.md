@@ -28,11 +28,10 @@ add i think. You could of course also implement MVCC at the KV level like i thin
 cockroachdb also does.
 
 The goals with v2 are:
-- Write my own storage engine
+- Write my own storage engine (<- currently spending most time here)
 - support all CRUD operations (maybe ALTER TABLE too)
 - be multi user and transactional (i'm thinking likely MVCC)
-- write a proper heuristics based optimizer/planner 
-  with useable performance (maybe cost based later)
+- write a proper cost based based optimizer with a simple cost model (likely DPccp/DPhyp)
 - make it an actual database server (maybe support postgres wire protocol)
 - actually test it too
 
@@ -40,4 +39,4 @@ I will likely first implement the storage engine because you can test that in is
 I will also likely implement create table, insert and select first again and leave the rest for
 later. All the multi user, transactional and server stuff or maybe a proper optimizer
 will likely come last (since i found the planner/optimizer to be the part i found hardest to 
-write in v1).
+write in v1, one Thomas Neumann Query Optimization course later i feel a bit more comfortable now though).
