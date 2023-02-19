@@ -56,21 +56,40 @@ impl PageTableBucket {
     }
 }
 
-pub struct BufferManager {
-    // To avoid deadlocks:
-    // Always take pagetable lock before replacer lock unless
-    // You only need one of them.
+/*
+    TODO: Abstract over access methods (per buffer manager implementation).
+          This would allow implementing something like the LeanStore/Umbra buffer manager
+          using pointer swizzling that requires everything to be done in trees. Also maybe allow
+          the API to work with variable sized pages.
+
+          In general the in-memory case should probably be optimized for more than the disk case
+          nowerdays. One buffer manager choice that would be interesting to implement and should
+          even be possible with the current interface (but not in safe Rust) would be Victor Leis's
+          Virtual Memory assisted Buffer Management (vmcache)
+          (https://www.cs.cit.tum.de/fileadmin/w00cfj/dis/_my_direct_uploads/vmcache.pdf)
+          which should offer a rather good performance for real world workloads that are mainly 
+          in-memory and isn't as invasive as the LeanStore approach.
+ */
+
+pub trait BufferManager: Sync + Send {
+    fn get_page(&self, page_id: PageId) -> Result<PageType, BufferManagerError>;
+    fn get_total_num_pages(&self, segment_id: RelationIdType) -> u64;
+    fn flush(&self) -> Result<(), BufferManagerError>;
+}
+
+pub struct HashTableBufferManager<R: Replacer + Send, S: StorageManager> {
     pagetable: PageTableType,
     pagetable_size: AtomicUsize,
-    disk_manager: Box<dyn StorageManager>,
-    replacer: Mutex<Box<dyn Replacer + Send>>,
+    disk_manager: S,
+    replacer: Mutex<R>,
     size: usize
 }
 
 #[derive(Debug)]
 pub enum BufferManagerError {
     NoBufferFrameAvailable,
-    DiskError(std::io::Error)
+    DiskError(std::io::Error),
+    PageNotFound
 }
 
 impl From<std::io::Error> for BufferManagerError {
@@ -89,13 +108,13 @@ impl Display for BufferManagerError {
 
 impl Error for BufferManagerError {}
 
-impl BufferManager {
-    pub fn new(disk_manager: Box<dyn StorageManager>, replacer: Box<dyn Replacer + Send>, size: usize) -> BufferManager {
+impl<R: Replacer + Send, S: StorageManager> HashTableBufferManager<R, S> {
+    pub fn new(disk_manager: S, replacer: R, size: usize) -> HashTableBufferManager<R, S> {
         let mut pagetable = PageTableType::with_capacity(size * 2);
         for _ in 0..size * 2 {
             pagetable.push(Mutex::new(PageTableBucket::new()));
         }
-        return BufferManager {
+        return HashTableBufferManager {
             pagetable,
             pagetable_size: AtomicUsize::new(0),
             disk_manager,
@@ -109,9 +128,8 @@ impl BufferManager {
     }
 
     fn load(&self, page_id: PageId, mut page_bucket: MutexGuard<PageTableBucket>) -> Result<PageType, BufferManagerError> {
-        let new_page = Arc::new(RwLock::new(Page::new()));
+        let new_page = Arc::new(RwLock::new(Page::new(page_id)));
         let mut new_page_write = new_page.try_write().unwrap();
-        new_page_write.id = Some(page_id);
         page_bucket.insert(page_id, new_page.clone());
         drop(page_bucket);
         if self.pagetable_size.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
@@ -142,7 +160,7 @@ impl BufferManager {
                         let mut victim_page_write = victim_page_write_result.unwrap();
                         if victim_page_write.state == PageState::DIRTY {
                             drop(victim_bucket);                      
-                            self.disk_manager.write_page(victim_page_write.id.expect("Dirty page cannot be new page"), &victim_page_write.data)?;
+                            self.disk_manager.write_page(victim_page_write.id, &victim_page_write.data)?;
                             victim_page_write.state = PageState::CLEAN;
                             victim_bucket = self.pagetable[self.get_pagetable_index(victim)].lock().unwrap();
                         } 
@@ -186,8 +204,10 @@ impl BufferManager {
                             .flatten()
                             .collect()
     }
+}
 
-    pub fn get_page(&self, page_id: PageId) -> Result<PageType, BufferManagerError> {
+impl<R: Replacer + Send, S: StorageManager> BufferManager for HashTableBufferManager<R,S> {
+    fn get_page(&self, page_id: PageId) -> Result<PageType, BufferManagerError> {
         let page_bucket = self.pagetable[self.get_pagetable_index(page_id)].lock().unwrap();
         let page = if let Some(result) = page_bucket.get(page_id) {
             drop(page_bucket);
@@ -204,19 +224,17 @@ impl BufferManager {
         Ok(page)
     }
 
-    pub fn get_total_num_pages(&self, segment_id: RelationIdType) -> u64 {
+    fn get_total_num_pages(&self, segment_id: RelationIdType) -> u64 {
         self.disk_manager.get_relation_size(segment_id)
     }
 
-    pub fn flush(&self) -> Result<(), BufferManagerError> {
+    fn flush(&self) -> Result<(), BufferManagerError> {
         for bucket in &self.pagetable {
             for (_, page) in bucket.lock().unwrap().bucket.iter() {
                 let mut page = page.write().unwrap();
-                if let Some(id) = page.id {
-                    if page.state.is_dirtyish() {
-                        self.disk_manager.write_page(id, &page.data)?;
-                        page.state = PageState::CLEAN;
-                    }
+                if page.state.is_dirtyish() {
+                    self.disk_manager.write_page(page.id, &page.data)?;
+                    page.state = PageState::CLEAN;
                 }
             }
         }
@@ -224,11 +242,55 @@ impl BufferManager {
     }
 }
 
-impl Drop for BufferManager {
+impl<R: Replacer + Send, S: StorageManager> Drop for HashTableBufferManager<R, S> {
     fn drop(&mut self) {
         // Not sure whether you actually want to unwrap here.
         // I don't really know whether there's a better choice here.
         self.flush().unwrap(); 
+    }
+}
+
+#[cfg(test)]
+mod mock {
+    use std::{collections::HashMap, sync::Mutex};
+
+    use crate::storage::page::PageId;
+
+    use super::{PageType, BufferManager};
+
+    struct MockBufferManager {
+        segments: Mutex<HashMap<u16, HashMap<u64, PageType>>>
+    }
+
+    impl BufferManager for MockBufferManager {
+        fn get_page(&self, page_id: PageId) -> Result<PageType, super::BufferManagerError> {
+            let segments = self.segments.lock().unwrap();
+            let page = segments
+                .get(&page_id.segment_id)
+                .and_then(|segment| segment.get(&page_id.offset_id));
+            if let Some(page) = page {
+                Ok(page.clone())
+            } else {
+                Err(super::BufferManagerError::PageNotFound)
+            }
+        }
+
+        fn get_total_num_pages(&self, segment_id: u16) -> u64 {
+            self.segments.lock().unwrap()[&segment_id].len() as u64
+        }
+
+        fn flush(&self) -> Result<(), super::BufferManagerError> {
+            let segments = self.segments.lock().unwrap();
+            for (_, segment) in segments.iter() {
+                for (_, page) in segment.iter() {
+                    let mut page = page.write().unwrap();
+                    if page.state.is_dirtyish() {
+                        page.state = super::PageState::CLEAN;
+                    }
+                }
+            }
+            Ok(())
+        }
     }
 }
 
@@ -238,15 +300,15 @@ mod tests {
     use std::{path::PathBuf, thread::{self, JoinHandle}, sync::{atomic::{AtomicU32, Ordering}, Arc, RwLock}};
     use rand::{Rng};
 
-    use crate::storage::{disk::DiskManager, page::{PageId, PAGE_SIZE, Page, PageState}, clock_replacer::ClockReplacer, replacer::MockReplacer};
+    use crate::storage::{disk::DiskManager, page::{PageId, PAGE_SIZE, Page, PageState}, clock_replacer::ClockReplacer, replacer::MockReplacer, buffer_manager::BufferManager};
 
-    use super::BufferManager;
+    use super::HashTableBufferManager;
 
     #[test]
     fn first_page_test() {
         let datadir = tempfile::tempdir().unwrap();
         let disk_manager = DiskManager::new(datadir.into_path());
-        let bpm = BufferManager::new(Box::new(disk_manager), Box::new(ClockReplacer::new()), 10);
+        let bpm = HashTableBufferManager::new(disk_manager, ClockReplacer::new(), 10);
         let page = bpm.get_page(PageId::new(1,1)).unwrap();
         let page = page.try_read().unwrap();
         assert_eq!(page.state, PageState::NEW);
@@ -258,7 +320,7 @@ mod tests {
         let datadir = tempfile::tempdir().unwrap();
         let datadir_path = PathBuf::from(datadir.path());
         let disk_manager = DiskManager::new(datadir_path.clone());
-        let bpm = BufferManager::new(Box::new(disk_manager), Box::new(ClockReplacer::new()), 10);
+        let bpm = HashTableBufferManager::new(disk_manager, ClockReplacer::new(), 10);
         let page = bpm.get_page(PageId::new(1,0)).unwrap();
         let mut page_write = page.try_write().unwrap();
         fill_page(PageId::new(1,0), &mut page_write);
@@ -266,7 +328,7 @@ mod tests {
         drop(page);
         drop(bpm);
         let disk_manager = DiskManager::new(datadir_path);
-        let bpm = BufferManager::new(Box::new(disk_manager), Box::new(ClockReplacer::new()), 10);
+        let bpm = HashTableBufferManager::new(disk_manager, ClockReplacer::new(), 10);
         let page = bpm.get_page(PageId::new(1,0)).unwrap();
         let page_read = page.try_read().unwrap();
         assert_page(PageId::new(1, 0), &page_read)
@@ -283,12 +345,12 @@ mod tests {
         replacer_mock.expect_use_page().return_const(());
         replacer_mock.expect_swap_pages().return_const(());
         replacer_mock.expect_has_page().return_const(true);
-        let bpm = BufferManager::new(Box::new(disk_manager), Box::new(replacer_mock), 1);
+        let bpm = HashTableBufferManager::new(disk_manager, replacer_mock, 1);
         let _page = bpm.get_page(PageId::new(1,1)).unwrap();
         let _page2 = bpm.get_page(PageId::new(1, 2)).unwrap();
         let pages = bpm.get_buffered_pages();
         assert_eq!(pages.len(), 1);
-        assert_eq!(pages[0].try_read().unwrap().id.unwrap(), PageId::new(1, 2));
+        assert_eq!(pages[0].try_read().unwrap().id, PageId::new(1, 2));
     }
 
     #[test]
@@ -305,7 +367,7 @@ mod tests {
         replacer_mock.expect_use_page().return_const(());
         replacer_mock.expect_swap_pages().return_const(());
         replacer_mock.expect_has_page().return_const(true);
-        let bpm = BufferManager::new(Box::new(disk_manager), Box::new(replacer_mock), 1);
+        let bpm = HashTableBufferManager::new(disk_manager, replacer_mock, 1);
         let page = bpm.get_page(PageId::new(1,1)).unwrap();
         let mut page_write = page.try_write().unwrap();
         fill_page(PageId::new(1, 1), &mut page_write);
@@ -322,7 +384,7 @@ mod tests {
     fn multithreaded_contention_test() {
         let datadir = tempfile::tempdir().unwrap();
         let disk_manager = DiskManager::new(datadir.into_path());
-        let bpm = Arc::new(BufferManager::new(Box::new(disk_manager), Box::new(ClockReplacer::new()), 100));
+        let bpm = Arc::new(HashTableBufferManager::new(disk_manager, ClockReplacer::new(), 100));
         let next_offset_id = Arc::new(AtomicU32::new(0));
         let page_counter = Arc::new(AtomicU32::new(0));
         let pages: Arc<RwLock<Vec<PageId>>> = Arc::new(RwLock::new(Vec::new()));

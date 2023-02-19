@@ -97,7 +97,7 @@ mod tests {
     use super::ClockReplacer;
 
     let mut testee = ClockReplacer::new();
-    let page: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new()));
+    let page: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new(PageId::new(1, 1))));
     testee.load_page(PageId::new(1, 1), page.clone());
     assert!(testee.has_page(PageId::new(1,1)), "Replacer should have page now");
   }
@@ -109,9 +109,9 @@ mod tests {
     use super::ClockReplacer;
 
     let mut testee = ClockReplacer::new();
-    let page: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new()));
+    let page: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new(PageId::new(1, 1))));
     testee.load_page(PageId::new(1, 1), page.clone());
-    let page2: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new()));
+    let page2: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new(PageId::new(1, 1))));
     testee.swap_pages(PageId::new(1,1), PageId::new(2, 2), page2.clone());
     assert!(!testee.has_page(PageId::new(1, 1)), "Replacer should no longer have old page");
     assert!(testee.has_page(PageId::new(2, 2)), "Replacer should have page now");
@@ -124,7 +124,7 @@ mod tests {
     use super::ClockReplacer;
 
     let mut testee = ClockReplacer::new();
-    let page: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new()));
+    let page: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new(PageId::new(1, 1))));
     testee.load_page(PageId::new(1, 1), page.clone());
     assert_eq!(testee.find_victim(), Some(PageId::new(1, 1)));
   }
@@ -138,13 +138,13 @@ mod tests {
 
     let mut testee = ClockReplacer::new();
     let page_id = PageId::new(1, 1);
-    let page1: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new()));
+    let page1: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new(PageId::new(1, 1))));
     testee.load_page(page_id, page1.clone());
     let page_id = PageId::new(1, 2);
-    let page2: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new()));
+    let page2: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new(PageId::new(1, 2))));
     testee.load_page(page_id, page2.clone());
     let page_id = PageId::new(2, 3);
-    let page3: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new()));
+    let page3: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new(PageId::new(2, 3))));
     testee.load_page(page_id, page3.clone());
     assert_eq!(testee.find_victim(), Some(PageId::new(1, 1)));
     assert_eq!(testee.find_victim(), Some(PageId::new(1, 2)));
@@ -159,16 +159,16 @@ mod tests {
 
     let mut testee = ClockReplacer::new();
     let page_id = PageId::new(1, 1);
-    let page1: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new()));
+    let page1: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new(page_id)));
     testee.load_page(page_id, page1.clone());
     let page_id = PageId::new(1, 2);
-    let page2: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new()));
+    let page2: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new(page_id)));
     testee.load_page(page_id, page2.clone());
     let page_id = PageId::new(2, 3);
-    let page3: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new()));
+    let page3: Arc<RwLock<Page>> = Arc::new(RwLock::new(Page::new(page_id)));
     testee.load_page(page_id, page3.clone());
 
-    let page1_2 = page1.clone();
+    let _page1_2 = page1.clone();
     assert_eq!(testee.find_victim(), Some(PageId::new(1, 2)));
     assert_eq!(testee.find_victim(), Some(PageId::new(2, 3)));
     assert_eq!(testee.find_victim(), Some(PageId::new(1, 2)));

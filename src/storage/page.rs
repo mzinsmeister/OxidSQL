@@ -85,14 +85,14 @@ impl PageState {
 pub struct Page{
     pub data: Box<[u8]>,
     pub state: PageState,
-    pub id: Option<PageId>,
+    pub id: PageId,
 }
 
 impl Page {
-    pub fn new() -> Page {
+    pub fn new(page_id: PageId) -> Page {
         Page {
             state: PageState::NEW,
-            id: Option::None,
+            id: page_id,
             data: Box::new([])
         }
     }

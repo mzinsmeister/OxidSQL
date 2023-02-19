@@ -1,6 +1,8 @@
 use std::{sync::Arc, collections::BTreeMap};
 use crate::{storage::{buffer_manager::BufferManager, page::Page}, types::RelationTID};
 
+use super::free_space_inventory::FreeSpaceSegment;
+
 // We implement a safe variant for now. Transmuting stuff like the header will likely lead to more
 // readable code but would need unsafe
 
@@ -65,9 +67,14 @@ impl From<&Slot> for [u8; 8] {
     }
 }
 
-pub struct SlottedPageSegment {
-    bm: Arc<BufferManager>,
-    segment_id: u16
+pub struct SlottedPageSegment<B: BufferManager> {
+    bm: Arc<B>,
+    segment_id: u16,
+    free_space_segment: FreeSpaceSegment<B>
+}
+
+impl<B: BufferManager> SlottedPageSegment<B> {
+
 }
 
 trait SlottedPageRead {

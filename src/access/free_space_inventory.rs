@@ -29,14 +29,14 @@ good/average case you will likely have all your pages towards the end of the seg
 read a handful of pages at most. Linear search is very cache friendly and therefore very fast anyway. We won't have
 to do any calculations in the loop that does the linear search because the encoding function is monotonic.
 */
-pub struct FreeSpaceSegment {
-    bm: Arc<BufferManager>,
+pub struct FreeSpaceSegment<B: BufferManager> {
+    bm: Arc<B>,
     segment_id: u16,
     max_useable_space: usize
 }
 
-impl FreeSpaceSegment {
-    pub fn new(segment_id: u16, max_useable_space: usize, bm: Arc<BufferManager>) -> Self {
+impl<B: BufferManager> FreeSpaceSegment<B> {
+    pub fn new(segment_id: u16, max_useable_space: usize, bm: Arc<B>) -> Self {
         Self { bm, segment_id, max_useable_space }
     }
 
