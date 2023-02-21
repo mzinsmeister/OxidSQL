@@ -25,8 +25,6 @@ impl Error for PageError{}
 // Were using 16kb pages for now. 
 // Thomas Neumann told us to go for at least this so we will do exactly that for now
 pub const PAGE_SIZE: usize = 16384; 
-pub const PAGE_HEADER_SIZE: u16 = 6;
-pub const ENTRY_POINTER_SIZE: u16 = 4;
 
 //Instead of Wrapping a Page in a Lock, maybe Wrap data in an RwLock, make dirty an Atomic Bool and wrap id in RwLock or something
 

@@ -1,6 +1,7 @@
 mod types;
 mod storage;
 mod access;
+mod optimizer;
 
 use std::{fs::create_dir_all, path::Path};
 

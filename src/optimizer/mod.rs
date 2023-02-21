@@ -1,3 +1,6 @@
+mod query_graph;
+mod optimizer;
+
 /*
     TODO: Implement an optimizer that can take a query plan and produce an optimized plan by applying
           optimization techniques such as:#
@@ -16,3 +19,6 @@
           of resulting plans the more join-relations the query contains while keeping a reasonable 
           optimization time.
  */
+
+// TODO: Public facing optimizher interface
+
