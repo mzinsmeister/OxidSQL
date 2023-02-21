@@ -38,10 +38,11 @@ impl QueryGraph {
         from_relation_id: usize,
         to_relation_id: usize,
         selectivity: f64,
+        predicate: ()
     ) {
         let from = self.relation_node_map[&from_relation_id];
         let to = self.relation_node_map[&to_relation_id];
-        self.graph.add_edge(from, to, QueryEdge { selectivity });
+        self.graph.add_edge(from, to, QueryEdge { selectivity, predicate });
     }
 
     pub(super) fn get_node(&self, relation_id: usize) -> &QueryNode {
