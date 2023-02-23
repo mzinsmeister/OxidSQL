@@ -12,6 +12,8 @@ pub(super) struct QueryEdge {
     pub predicate: ()
 }
 
+/// The Query Graph is a helper data structure for all kinds of optimizers. 
+/// This one internally uses Petgraph for now
 pub(super) struct QueryGraph {
     graph: petgraph::Graph<QueryNode, QueryEdge>,
     relation_node_map: HashMap<usize, petgraph::graph::NodeIndex>,

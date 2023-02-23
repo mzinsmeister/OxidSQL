@@ -9,6 +9,8 @@ edition = "2021"
 byteorder = "1.4.3"
 petgraph = "0.6.3"
 itertools = "0.10.5"
+rand = "0.8.5"
+libc = "0.2.139"
 
 [dev-dependencies]
 tempfile = "3"

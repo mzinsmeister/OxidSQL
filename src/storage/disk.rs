@@ -1,6 +1,6 @@
-use std::{fs::{File, metadata}, path::PathBuf, io::{Seek, Read, SeekFrom, Write}, sync::{RwLock, Arc}};
+use std::{fs::{File, metadata}, path::{PathBuf, Path}, io::{Seek, Read, SeekFrom, Write}, sync::{RwLock, Arc}, collections::HashMap};
 
-use super::page::{PAGE_SIZE, PageId, RelationIdType};
+use super::page::{PAGE_SIZE, PageId, RelationIdType, SegmentId};
 
 #[cfg(test)]
 use mockall::{automock};
@@ -15,12 +15,78 @@ pub trait StorageManager: Sync + Send {
 }
 
 pub(super) struct DiskManager {
-  data_folder: Arc<RwLock<PathBuf>>
+  data_folder: Arc<RwLock<PathBuf>>,
+  #[cfg(unix)]
+  file_cache: Arc<RwLock<HashMap<SegmentId, File>>>
 }
 
 impl DiskManager {
   pub fn new(data_folder: PathBuf) -> DiskManager {
-    DiskManager { data_folder: Arc::new(RwLock::new(data_folder)) }
+    DiskManager {
+      data_folder: Arc::new(RwLock::new(data_folder)),
+      #[cfg(unix)]
+      file_cache: Arc::new(RwLock::new(HashMap::new()))
+    }
+  }
+}
+
+#[cfg(unix)]
+const O_DIRECT: i32 = 0o0040000;
+
+#[derive(Debug, PartialEq, Eq)]
+enum AccessType {
+  Read,
+  Write
+}
+
+impl DiskManager {
+  #[cfg(unix)]
+  fn open_file(&self, segment_id: RelationIdType, access: AccessType) -> File {
+    use std::os::unix::prelude::OpenOptionsExt;
+
+    let file = self.file_cache.read().unwrap().get(&segment_id).map(|f| f.try_clone());
+
+    if let Some(Ok(file)) = file {
+      return file;
+    }
+
+    let path = self.data_folder.read().unwrap()
+                          .join(segment_id.to_string());
+
+    let file = File::options()
+      .read(true)
+      .write(true)
+      .create(true)
+      .custom_flags(O_DIRECT)
+      .open(path)
+      .unwrap();
+
+    let file_clone = file.try_clone();
+    if let Ok(file_clone) = file_clone {
+      let mut file_cache = self.file_cache.write().unwrap();
+      file_cache.insert(segment_id, file_clone);
+      if file_cache.len() > 100 {
+        // For now just evict a random element. Better than nothing.
+        // TODO: Implement a LRU cache or something like that
+        let n = rand::random::<usize>() % file_cache.len();
+        let nth_segment_id = *file_cache.keys().nth(n).unwrap();
+        file_cache.remove(&nth_segment_id);
+      }
+    }
+    file
+  }
+
+  #[cfg(not(unix))]
+  fn open_file(&self, segment_id: RelationIdType, access: AccessType) -> File {
+    let path = self.data_folder.read().unwrap()
+                                .join(segment_id.to_string());
+
+    File::options()
+      .read(access == AccessType::Read)
+      .write(access == AccessType::Write)
+      .create(access == AccessType::Write)
+      .open(data_folder.join(segment_id.to_string()))
+      .unwrap()
   }
 }
 
@@ -30,23 +96,39 @@ impl StorageManager for DiskManager {
     File::create(self.data_folder.read().unwrap().join(segment_id.to_string())).unwrap();
   }
 
+  #[cfg(unix)]
   fn read_page(&self, page_id: PageId, buf: &mut[u8]) -> Result<(), std::io::Error> {
-    let mut file = File::options().read(true).open(self.data_folder.read().unwrap().join(page_id.segment_id.to_string())).unwrap();
+    use std::os::unix::prelude::FileExt;
+
+    let file = self.open_file(page_id.segment_id, AccessType::Read);
+    let offset = page_id.offset_id as u64 * PAGE_SIZE as u64;
+    file.read_exact_at(buf, offset)?;
+    Ok(())
+  }
+
+  #[cfg(unix)]
+  fn write_page(&self, page_id: PageId, buf: &[u8]) -> Result<(), std::io::Error> {
+    use std::os::unix::prelude::FileExt;
+
+    let mut file = self.open_file(page_id.segment_id, AccessType::Write);
+    let offset = page_id.offset_id as u64 * PAGE_SIZE as u64;
+    file.write_all_at(buf, offset)?;
+    Ok(())
+  }
+
+  #[cfg(not(unix))]
+  fn read_page(&self, page_id: PageId, buf: &mut[u8]) -> Result<(), std::io::Error> {
+    let mut file = self.open_file(page_id.segment_id, AccessType::Read);
+    let f = file.try_clone().unwrap();
     let offset = page_id.offset_id as u64 * PAGE_SIZE as u64;
     file.seek(SeekFrom::Start(offset))?;
     file.read_exact(buf)?;
     Ok(())
   }
 
+  #[cfg(not(unix))]
   fn write_page(&self, page_id: PageId, buf: &[u8]) -> Result<(), std::io::Error> {
-    // TODO: It's not ideal that we open the file new each time. Think about caching but then
-    // we need to make sure that we don't have races between seeks and read/writes
-    let mut file = File::options()
-                                .write(true)
-                                .create(true)
-                                .open(self.data_folder.read().unwrap()
-                                  .join(page_id.segment_id.to_string()))
-                                .unwrap();
+    let mut file = self.open_file(page_id.segment_id, AccessType::Write);
     let offset = page_id.offset_id as u64 * PAGE_SIZE as u64;
     file.seek(SeekFrom::Start(offset))?;
     file.write_all(buf)?;

@@ -28,10 +28,13 @@ pub const PAGE_SIZE: usize = 16384;
 
 //Instead of Wrapping a Page in a Lock, maybe Wrap data in an RwLock, make dirty an Atomic Bool and wrap id in RwLock or something
 
+pub type SegmentId = u16;
+pub type OffsetId = u64;
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct PageId {
-  pub segment_id: u16,
-  pub offset_id: u64
+  pub segment_id: SegmentId,
+  pub offset_id: OffsetId
 }
 
 impl PageId {
@@ -91,7 +94,7 @@ impl Page {
         Page {
             state: PageState::NEW,
             id: page_id,
-            data: Box::new([])
+            data: Box::new([]) // This doesn't actually do any allocation
         }
     }
 

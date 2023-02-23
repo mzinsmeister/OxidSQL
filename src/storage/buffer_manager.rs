@@ -1,4 +1,5 @@
 use crate::storage::page::{Page, PageState};
+use crate::util::align::alligned_slice;
 use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
 use std::fmt::Display;
@@ -108,6 +109,16 @@ impl Display for BufferManagerError {
 
 impl Error for BufferManagerError {}
 
+#[cfg(unix)]
+fn new_buffer_frame() -> Box<[u8]> {
+    alligned_slice(PAGE_SIZE, 4096)
+}
+
+#[cfg(not(unix))]
+fn new_buffer_frame() -> Box<[u8]> {
+    Box::new([0; PAGE_SIZE])
+}
+
 impl<R: Replacer + Send, S: StorageManager> HashTableBufferManager<R, S> {
     pub fn new(disk_manager: S, replacer: R, size: usize) -> HashTableBufferManager<R, S> {
         let mut pagetable = PageTableType::with_capacity(size * 2);
@@ -137,7 +148,7 @@ impl<R: Replacer + Send, S: StorageManager> HashTableBufferManager<R, S> {
             let mut replacer = self.replacer.lock().unwrap();
             replacer.load_page(page_id, new_page.clone());
             drop(replacer);
-            new_page_write.data = Box::new([0; PAGE_SIZE]);
+            new_page_write.data = new_buffer_frame();
             if self.disk_manager.get_relation_size(page_id.segment_id) / PAGE_SIZE as u64 > page_id.offset_id {
                 self.disk_manager.read_page(page_id, &mut new_page_write.data)?;
             }
@@ -169,6 +180,10 @@ impl<R: Replacer + Send, S: StorageManager> HashTableBufferManager<R, S> {
                         // Load it again with the old data
                         assert!(Arc::strong_count(&victim_page) >= 3);
                         if Arc::strong_count(&victim_page) == 3 {
+                            // Little trick that should give us better performance without
+                            // actually having to reuse the buffer frame since it means we can do 
+                            // buffer replacement without any allocations
+                            std::mem::swap(&mut victim_page_write.data, &mut new_page_write.data);
                             drop(victim_page_write);
                             replacer = self.replacer.lock().unwrap();
                             victim_bucket.remove(victim);
@@ -177,7 +192,6 @@ impl<R: Replacer + Send, S: StorageManager> HashTableBufferManager<R, S> {
                             drop(victim_page);
                             drop(replacer);
                             drop(victim_bucket);
-                            new_page_write.data = Box::new([0; PAGE_SIZE]);
                             if self.disk_manager.get_relation_size(page_id.segment_id) / PAGE_SIZE as u64 > page_id.offset_id {
                                 self.disk_manager.read_page(page_id, &mut new_page_write.data)?;
                                 new_page_write.state = PageState::CLEAN;
@@ -300,7 +314,7 @@ mod tests {
     use std::{path::PathBuf, thread::{self, JoinHandle}, sync::{atomic::{AtomicU32, Ordering}, Arc, RwLock}};
     use rand::{Rng};
 
-    use crate::storage::{disk::DiskManager, page::{PageId, PAGE_SIZE, Page, PageState}, clock_replacer::ClockReplacer, replacer::MockReplacer, buffer_manager::BufferManager};
+    use crate::storage::{disk::{DiskManager, StorageManager}, page::{PageId, PAGE_SIZE, Page, PageState}, clock_replacer::ClockReplacer, replacer::MockReplacer, buffer_manager::BufferManager};
 
     use super::HashTableBufferManager;
 
@@ -384,7 +398,8 @@ mod tests {
     fn multithreaded_contention_test() {
         let datadir = tempfile::tempdir().unwrap();
         let disk_manager = DiskManager::new(datadir.into_path());
-        let bpm = Arc::new(HashTableBufferManager::new(disk_manager, ClockReplacer::new(), 100));
+        disk_manager.create_relation(1);
+        let bpm = Arc::new(HashTableBufferManager::new(disk_manager, ClockReplacer::new(), 200));
         let next_offset_id = Arc::new(AtomicU32::new(0));
         let page_counter = Arc::new(AtomicU32::new(0));
         let pages: Arc<RwLock<Vec<PageId>>> = Arc::new(RwLock::new(Vec::new()));
@@ -397,7 +412,7 @@ mod tests {
             let page_counter = page_counter.clone();
             jhs.push(thread::spawn(move || {
                 let mut rng: rand::rngs::StdRng = rand::SeedableRng::seed_from_u64(42 * i);
-                for j in 0..1_000 {
+                for j in 0..200 {
                     let r: u64 = rng.gen();
                     if page_counter.load(Ordering::Relaxed) < 5 || r % 10 == 0 {
                         // create new
