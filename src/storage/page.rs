@@ -4,6 +4,9 @@ use std::convert::TryInto;
 use std::fmt::{Display, Formatter};
 use byteorder::{BigEndian, WriteBytesExt, ReadBytesExt};
 
+use crate::util::align::AlignedSlice;
+use crate::util::align::EmptyAlignedSlice;
+
 pub type RelationIdType = u16;
 
 #[derive(Debug)]
@@ -84,7 +87,7 @@ impl PageState {
 }
 
 pub struct Page{
-    pub data: Box<[u8]>,
+    pub data: AlignedSlice,
     pub state: PageState,
     pub id: PageId,
 }
@@ -94,7 +97,7 @@ impl Page {
         Page {
             state: PageState::NEW,
             id: page_id,
-            data: Box::new([]) // This doesn't actually do any allocation
+            data: AlignedSlice::new_empty() // This doesn't actually do any allocation
         }
     }
 
@@ -117,8 +120,7 @@ impl Page {
     pub fn set_u16(&mut self, pos: usize, val: u16) {
         let mut bytes = Vec::with_capacity(2);
         bytes.write_u16::<BigEndian>(val).unwrap();
-        self.data[pos] = bytes[0];
-        self.data[pos + 1] = bytes[1];
+        self.data[pos..pos+2].copy_from_slice(&bytes);
         self.state = self.state.get_dirty_repr();
     }
 

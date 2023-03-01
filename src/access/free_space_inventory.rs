@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::storage::{buffer_manager::BufferManager, page::{PAGE_SIZE, PageId, Page}};
+use crate::storage::{buffer_manager::BufferManager, page::{PAGE_SIZE, PageId, Page, OffsetId}};
 
 /*
 Free Space Segment:
@@ -75,50 +75,53 @@ impl<B: BufferManager> FreeSpaceSegment<B> {
         }
     }
 
-    pub fn find_page(&self, size: u16) {
-        // Page must have at most this size class
-        let encoded = self.encode(self.max_useable_space - size as usize); 
+    pub fn find_page(&self, size: u16) -> OffsetId {
+        // Page must have at most one less than this size class except for empty pages
+        let encoded = self.encode(self.max_useable_space - size as usize).max(1) - 1; 
         let page = self.bm.get_page(PageId::new(self.segment_id, 0)).unwrap(); // TODO: Handle error case
         let page_read = page.read().unwrap();
-        Self::read_cache_for_size_class(&page_read, encoded);
+        Self::read_cache_for_size_class(&page_read, encoded)
     }
 
     pub fn update_page_size(&self, page_nr: u64, size: u16) {
         // Page must have at most this size class
-        let encoded = self.encode(self.max_useable_space - size as usize);
-        let fsi_page = (page_nr * 4 + 15 * 64) / (PAGE_SIZE as u64 * 8);
-        let nibble_id = (page_nr * 4 + 15 * 64) % (PAGE_SIZE as u64 * 4);
+        let size_nibble = self.encode(self.max_useable_space - size as usize);
+        let fsi_page = (page_nr + 15*16) / (PAGE_SIZE as u64 * 2);
+        let nibble_id = (page_nr + 15*16) % (PAGE_SIZE as u64 * 2);
         let page = self.bm.get_page(PageId::new(self.segment_id, 0)).unwrap(); // TODO: Handle error case
         let mut page_write = page.write().unwrap();
         let previous_size = Self::read_nibble(&page_write, nibble_id);
-        Self::write_nibble(&mut page_write, nibble_id, encoded);
-        if previous_size != encoded {
+        Self::write_nibble(&mut page_write, nibble_id, size_nibble);
+        if previous_size != size_nibble {
             page_write.make_dirty();
         }
-        drop(page_write);
+        drop(page_write); // Fsi segment isn't guaranteed to actually give you up to date information anyway so we can unlock here
         drop(page);
-        if previous_size != encoded && previous_size < 15 {
+        if previous_size != size_nibble && previous_size < 15 {
             let cache_page = self.bm.get_page(PageId::new(self.segment_id, 0)).unwrap(); // TODO: Handle error case
             let mut cache_page_write = cache_page.write().unwrap();
             let old_class_cached = Self::read_cache_for_size_class(&cache_page_write, previous_size);
-            let new_class_cached = Self::read_cache_for_size_class(&cache_page_write, encoded);
+            let new_class_cached = Self::read_cache_for_size_class(&cache_page_write, size_nibble);
             if old_class_cached == page_nr || new_class_cached > page_nr {
-                // Need to update the cache by finding new pages
+                // Need to update the cache by finding new pages for [previous_size, upper_bound)
                 let mut upper_bound = previous_size;
                 for i in previous_size..15 {
-                    if Self::read_cache_for_size_class(&cache_page_write, i) == page_nr && i < encoded{
+                    if Self::read_cache_for_size_class(&cache_page_write, i) == page_nr && i < size_nibble{
                         upper_bound = i + 1;
                     } else {
                         break;
                     }
                 }
                 if fsi_page == 0 {
-                    for nibble in 15*16..PAGE_SIZE * 2 {
-                        let size = Self::read_nibble(&cache_page_write, nibble as u64);
-                        for current_size in upper_bound..=size {
+                    for nibble in nibble_id + 1..(PAGE_SIZE as u64 * 2) {
+                        let size = Self::read_nibble(&cache_page_write, nibble);
+                        for current_size in (size.max(previous_size)..upper_bound).rev() {
                             upper_bound = current_size;
-                            Self::write_cache_for_size_class(&mut cache_page_write, current_size, PAGE_SIZE as u64 * 2 + nibble as u64 - 15 * 16);
+                            Self::write_cache_for_size_class(&mut cache_page_write, current_size, nibble as u64 - 15 * 16);
                             cache_page_write.make_dirty();
+                        }
+                        if upper_bound <= previous_size {
+                            break;
                         }
                     }
                 }
@@ -127,18 +130,21 @@ impl<B: BufferManager> FreeSpaceSegment<B> {
                 while upper_bound > previous_size {
                     let page = self.bm.get_page(PageId::new(self.segment_id, page_id)).unwrap(); // TODO: Handle error case
                     let page_read = page.read().unwrap();
-                    for nibble in 0..PAGE_SIZE * 2 {
-                        let size = Self::read_nibble(&page_read, nibble as u64);
-                        for current_size in upper_bound..=size {
+                    for nibble in nibble_id + 1..PAGE_SIZE as u64 * 2 {
+                        let size = Self::read_nibble(&page_read, nibble);
+                        for current_size in (size.max(previous_size)..upper_bound).rev() {
                             upper_bound = current_size;
-                            Self::write_cache_for_size_class(&mut cache_page_write, current_size, page_id * PAGE_SIZE as u64 * 2 + nibble as u64  - 15 * 16);
+                            Self::write_cache_for_size_class(&mut cache_page_write, current_size, page_id * PAGE_SIZE as u64 * 2 + nibble as u64 - 15 * 16);
                             cache_page_write.make_dirty();
+                        }
+                        if upper_bound <= previous_size {
+                            break;
                         }
                     }
                     page_id += 1;
                 }
             }
-            for i in encoded..15 {
+            for i in size_nibble..15 {
                 let cached_page = Self::read_cache_for_size_class(&cache_page_write, i);
                 if cached_page > page_nr {
                     Self::write_cache_for_size_class(&mut cache_page_write, i, page_nr);
@@ -168,10 +174,43 @@ impl<B: BufferManager> FreeSpaceSegment<B> {
 }
 
 
+#[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
+    use crate::storage::{buffer_manager::mock::MockBufferManager, page::PAGE_SIZE};
+
+    use super::FreeSpaceSegment;
     
     #[test]
     fn first_cache() {
-        // TODO
+        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let testee = FreeSpaceSegment::new(0, 1000, bm);
+        assert_eq!(testee.find_page(1000), 0);
+        assert_eq!(testee.find_page(10), 0);
+        assert_eq!(testee.find_page(200), 0);
+        assert_eq!(testee.find_page(500), 0);
+    }
+
+    #[test]
+    fn update_cache_completely() {
+        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let testee = FreeSpaceSegment::new(0, 1000, bm);
+        testee.update_page_size(0, 0);
+        assert_eq!(testee.find_page(1000), 1);
+        assert_eq!(testee.find_page(10), 1);
+        assert_eq!(testee.find_page(200), 1);
+        assert_eq!(testee.find_page(500), 1);
+    }
+
+    #[test]
+    fn update_cache_partly() {
+        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let testee = FreeSpaceSegment::new(0, 1000, bm);
+        testee.update_page_size(0, 500);
+        assert_eq!(testee.find_page(1000), 1);
+        assert_eq!(testee.find_page(10), 0);
+        assert_eq!(testee.find_page(200), 0);
+        assert_eq!(testee.find_page(501), 1);
     }
 }

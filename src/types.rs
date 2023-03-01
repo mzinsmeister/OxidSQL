@@ -1,8 +1,8 @@
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RelationTID {
-    page_id: u64, // only current segment (48 bits max)
-    slot_id: u16
+    pub page_id: u64, // only current segment (48 bits max)
+    pub slot_id: u16
 }
 
 impl From<u64> for RelationTID {

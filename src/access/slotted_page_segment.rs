@@ -1,5 +1,5 @@
-use std::{sync::Arc, collections::BTreeMap};
-use crate::{storage::{buffer_manager::BufferManager, page::{Page, PAGE_SIZE}}, types::RelationTID};
+use std::{sync::Arc, collections::BTreeMap, ops::{Deref, DerefMut}};
+use crate::{storage::{buffer_manager::{BufferManager, BufferManagerError}, page::{Page, PAGE_SIZE, PageId}}, types::RelationTID};
 
 use super::free_space_inventory::FreeSpaceSegment;
 
@@ -81,6 +81,13 @@ impl<B: BufferManager> SlottedPageSegment<B> {
             free_space_segment: FreeSpaceSegment::new(free_space_segment_id, PAGE_SIZE - HEADER_SIZE, bm)
         }
     }
+
+    fn get_data<T, F: Fn(&[u8]) -> T>(&self, tid: RelationTID, operation: F) -> Result<T, BufferManagerError> {
+        let page = self.bm.get_page(PageId::new(self.segment_id, tid.page_id))?;
+        let page_read = page.read().unwrap();
+        let slotted_page = SlottedPage::new(page_read);
+        unimplemented!();
+    }
 }
 
 trait SlottedPageRead {
@@ -103,15 +110,14 @@ trait SlottedPageRead {
     fn get_tuple(&self, offset: u32, length: u32) -> &[u8];
 }
 
-struct SlottedPage<A: AsRef<Page>> {
+struct SlottedPage<A: Deref<Target = Page>> {
     page: A
 }
 
-impl<A: AsRef<Page>> SlottedPage<A> {
+impl<A: Deref<Target = Page>> SlottedPage<A> {
     fn new(page: A) -> SlottedPage<A> {
         SlottedPage { page }
     }
-
 }
 
 fn get_slot_from_page(page: &Page, slot_id: u16) -> Slot {
@@ -127,42 +133,42 @@ fn get_tuple_from_page(page: &Page, data_start: u32, offset: u32, length: u32) -
     &get_data_from_page(page, data_start as usize)[offset as usize .. offset as usize + length as usize]
 }
 
-impl<A: AsRef<Page>> SlottedPageRead for SlottedPage<A> {
+impl<A: Deref<Target = Page>> SlottedPageRead for SlottedPage<A> {
 
     fn get_slot(&self, slot_id: u16) -> Slot {
-        get_slot_from_page(self.page.as_ref(), slot_id)
+        get_slot_from_page(&self.page, slot_id)
     }
 
     fn get_slot_count(&self) -> u16 {
-        self.page.as_ref().get_u16(0)
+        self.page.get_u16(0)
     }
 
     fn get_first_free_slot(&self) -> u16 {
-        self.page.as_ref().get_u16(2)
+        self.page.get_u16(2)
     }
 
     fn get_data_start(&self) -> u32 {
-        self.page.as_ref().get_u32(4)
+        self.page.get_u32(4)
     }
 
     fn get_free_space(&self) -> u32 {
-        self.page.as_ref().get_u32(8)
+        self.page.get_u32(8)
     }
 
     fn get_fragmented_free_space(&self) -> usize {
-        self.page.as_ref().data.len() - self.get_data_start() as usize - HEADER_SIZE - 8 * self.get_slot_count() as usize
+        self.page.data.len() - self.get_data_start() as usize - HEADER_SIZE - 8 * self.get_slot_count() as usize
     }
 
     fn get_data(&self) -> &[u8] {
-        get_data_from_page(self.page.as_ref(), self.get_data_start() as usize)
+        get_data_from_page(&self.page, self.get_data_start() as usize)
     }
 
     fn get_data_length(&self) -> u32 {
-        self.page.as_ref().data.len() as u32 - self.get_data_start()
+        self.page.data.len() as u32 - self.get_data_start()
     }
 
     fn get_tuple(&self, offset: u32, length: u32) -> &[u8] {
-        get_tuple_from_page(&self.page.as_ref(), self.get_data_start(), offset, length)
+        get_tuple_from_page(&self.page, self.get_data_start(), offset, length)
     }
 }
 
@@ -209,32 +215,32 @@ impl SlottedPageRead for SlottedPageMut<'_> {
     }
 }*/
 
-impl<A: AsRef<Page> + AsMut<Page>> SlottedPage<A> {
+impl<A: Deref<Target = Page> + DerefMut<Target = Page>> SlottedPage<A> {
     fn write_slot(&mut self, slot_id: u16, slot: &Slot) {
         let slot_offset = HEADER_SIZE + slot_id as usize * 8;
         let slot_binary: [u8; 8] = slot.into();
-        self.page.as_mut().data[slot_offset..slot_offset + 8].copy_from_slice(slot_binary.as_ref());
+        self.page.data[slot_offset..slot_offset + 8].copy_from_slice(slot_binary.as_ref());
     }
 
     fn set_slot_count(&mut self, slot_count: u16) {
-        self.page.as_mut().data[0..2].copy_from_slice(&slot_count.to_be_bytes());
+        self.page.data[0..2].copy_from_slice(&slot_count.to_be_bytes());
     }
 
     fn set_first_free_slot(&mut self, first_free_slot: u16) {
-        self.page.as_mut().data[2..4].copy_from_slice(&first_free_slot.to_be_bytes());
+        self.page.data[2..4].copy_from_slice(&first_free_slot.to_be_bytes());
     }
 
     fn set_free_space(&mut self, free_space: u32) {
-        self.page.as_mut().data[8..12].copy_from_slice(&free_space.to_be_bytes());
+        self.page.data[8..12].copy_from_slice(&free_space.to_be_bytes());
     }
 
     fn set_data_start(&mut self, data_start: u32) {
-        self.page.as_mut().data[4..8].copy_from_slice(&data_start.to_be_bytes());
+        self.page.data[4..8].copy_from_slice(&data_start.to_be_bytes());
     }
 
     fn get_tuple_mut(&mut self, offset: u32, length: u32) -> &mut [u8] {
         let data_start = self.get_data_start();
-        &mut self.page.as_mut().data[data_start as usize + offset as usize .. data_start as usize + offset as usize + length as usize]
+        &mut self.page.data[data_start as usize + offset as usize .. data_start as usize + offset as usize + length as usize]
     }
 
     fn allocate(&mut self, size: usize) -> Option<u16> {
@@ -362,10 +368,10 @@ impl<A: AsRef<Page> + AsMut<Page>> SlottedPage<A> {
                 offset_slot_map.insert(offset as usize, OffsetLengthSlot { slot_id, offset, length });
             }
         }
-        let mut new_data_start = self.page.as_mut().data.len() as u32;
+        let mut new_data_start = self.page.data.len() as u32;
         for (offset, slot) in offset_slot_map.iter() {
             new_data_start = new_data_start - slot.length;
-            self.page.as_mut().data.copy_within(*offset..*offset + slot.length as usize, new_data_start as usize);
+            self.page.data.copy_within(*offset..*offset + slot.length as usize, new_data_start as usize);
             let new_slot = Slot::new(new_data_start, slot.length);
             self.write_slot(slot.slot_id, &new_slot);
         }

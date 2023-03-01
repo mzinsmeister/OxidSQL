@@ -15,6 +15,10 @@ pub type PageType = Arc<RwLock<Page>>;
 // Self built (kinda) chaining hash table but with a Vec because Rusts LinkedList is useless
 pub(super) type PageTableType = Vec<Mutex<PageTableBucket>>; 
 
+fn new_page(page_id: PageId) -> PageType {
+    Arc::new(RwLock::new(Page::new(page_id)))
+}
+
 pub(super) struct PageTableBucket {
     bucket: Vec<(PageId, PageType)>
 }
@@ -61,7 +65,15 @@ impl PageTableBucket {
     TODO: Abstract over access methods (per buffer manager implementation).
           This would allow implementing something like the LeanStore/Umbra buffer manager
           using pointer swizzling that requires everything to be done in trees. Also maybe allow
-          the API to work with variable sized pages.
+          the API to work with variable sized pages. For the current buffer manager implementation
+          variable sized pages would theoretically be possible but it would require allocating
+          a new buffer for every new page with a different size as long as the replacer is not
+          aware of the different sizes. The clock replacer could for example be made aware of this
+          by adding the size to the clock entries and then maybe skipping ahead a few elements to
+          get one that has the same size. I'm pretty sure we still want powers of 2 only since
+          this strategy would otherwise be very likely to not find anything or waste space anyway.
+          You could for example go something like 10% around the clock and if you don't find one
+          with the correct size you just greedily pick from the front until you have enough space.
 
           In general the in-memory case should probably be optimized for more than the disk case
           nowerdays. One buffer manager choice that would be interesting to implement and should
@@ -110,13 +122,18 @@ impl Display for BufferManagerError {
 impl Error for BufferManagerError {}
 
 #[cfg(unix)]
-fn new_buffer_frame() -> Box<[u8]> {
-    alligned_slice(PAGE_SIZE, 4096)
+use crate::util::align::AlignedSlice;
+
+#[cfg(unix)]
+fn new_buffer_frame(size: usize) -> AlignedSlice {
+    alligned_slice(size, 4096)
 }
 
 #[cfg(not(unix))]
-fn new_buffer_frame() -> Box<[u8]> {
-    Box::new([0; PAGE_SIZE])
+fn new_buffer_frame(size: usize) -> Box<[u8]> {
+    let mut vec = Vec::with_capacity(size);
+    vec.resize(size, 0);
+    vec.into_boxed_slice()
 }
 
 impl<R: Replacer + Send, S: StorageManager> HashTableBufferManager<R, S> {
@@ -139,7 +156,7 @@ impl<R: Replacer + Send, S: StorageManager> HashTableBufferManager<R, S> {
     }
 
     fn load(&self, page_id: PageId, mut page_bucket: MutexGuard<PageTableBucket>) -> Result<PageType, BufferManagerError> {
-        let new_page = Arc::new(RwLock::new(Page::new(page_id)));
+        let new_page = new_page(page_id);
         let mut new_page_write = new_page.try_write().unwrap();
         page_bucket.insert(page_id, new_page.clone());
         drop(page_bucket);
@@ -148,7 +165,7 @@ impl<R: Replacer + Send, S: StorageManager> HashTableBufferManager<R, S> {
             let mut replacer = self.replacer.lock().unwrap();
             replacer.load_page(page_id, new_page.clone());
             drop(replacer);
-            new_page_write.data = new_buffer_frame();
+            new_page_write.data = new_buffer_frame(PAGE_SIZE);
             if self.disk_manager.get_relation_size(page_id.segment_id) / PAGE_SIZE as u64 > page_id.offset_id {
                 self.disk_manager.read_page(page_id, &mut new_page_write.data)?;
             }
@@ -265,27 +282,43 @@ impl<R: Replacer + Send, S: StorageManager> Drop for HashTableBufferManager<R, S
 }
 
 #[cfg(test)]
-mod mock {
-    use std::{collections::HashMap, sync::Mutex};
+pub mod mock {
+    use std::{collections::HashMap, sync::{Mutex, RwLock}};
 
-    use crate::storage::page::PageId;
+    use crate::{storage::page::{PageId, Page}, util::align::{AlignedSlice, alligned_slice}};
 
-    use super::{PageType, BufferManager};
+    use super::{PageType, BufferManager, new_page};
 
-    struct MockBufferManager {
+    pub struct MockBufferManager {
+        page_size: usize,
         segments: Mutex<HashMap<u16, HashMap<u64, PageType>>>
+    }
+
+    impl MockBufferManager {
+        pub fn new(page_size: usize) -> MockBufferManager {
+            MockBufferManager {
+                segments: Mutex::new(HashMap::new()),
+                page_size
+            }
+        }
     }
 
     impl BufferManager for MockBufferManager {
         fn get_page(&self, page_id: PageId) -> Result<PageType, super::BufferManagerError> {
-            let segments = self.segments.lock().unwrap();
+            let mut segments = self.segments.lock().unwrap();
             let page = segments
                 .get(&page_id.segment_id)
                 .and_then(|segment| segment.get(&page_id.offset_id));
             if let Some(page) = page {
                 Ok(page.clone())
             } else {
-                Err(super::BufferManagerError::PageNotFound)
+                segments.insert(page_id.segment_id, HashMap::new());
+                let new_page = new_page(page_id);
+                let mut new_page_guard = new_page.write().unwrap();
+                new_page_guard.data = alligned_slice(self.page_size, 1);
+                drop(new_page_guard);
+                segments.get_mut(&page_id.segment_id).unwrap().insert(page_id.offset_id, new_page);
+                Ok(segments[&page_id.segment_id][&page_id.offset_id].clone())
             }
         }
 
@@ -333,7 +366,17 @@ mod tests {
     fn flush_test() {
         let datadir = tempfile::tempdir().unwrap();
         let datadir_path = PathBuf::from(datadir.path());
-        let disk_manager = DiskManager::new(datadir_path.clone());
+     /*
+    TODO: Implement a parser for the SQL dialect supported by the database (likely using the nom
+          parser combinator library). The parser should produce an abstract syntax tree (AST) that 
+          can be analyzed by the analyzer which for now will also live in this module. The SQL
+          dialect should for now be compatible with postgres.
+
+          Options are:
+            - Use the parser written for my hacky v1 database (also with Nom)
+            - Use a library exposing the actual postgres parser in Rust
+            - Write a parser from scratch
+ */   let disk_manager = DiskManager::new(datadir_path.clone());
         let bpm = HashTableBufferManager::new(disk_manager, ClockReplacer::new(), 10);
         let page = bpm.get_page(PageId::new(1,0)).unwrap();
         let mut page_write = page.try_write().unwrap();
