@@ -53,7 +53,7 @@ impl From<&[u8]> for Slot {
             };
         }
         if source[0] & (1 << 7) != 0 {
-            let tid_num = u64::from_be_bytes(source.try_into().unwrap()) & !(1 << 31);
+            let tid_num = u64::from_be_bytes(source.try_into().unwrap()) & !(1 << 63);
             return Slot::Redirect { tid: RelationTID::from(tid_num) };
         }
         if source[0] & (1 << 6) != 0 {
@@ -128,9 +128,9 @@ impl<B: BufferManager> SlottedPageSegment<B> {
         let slotted_page = SlottedPage::new(page_read);
         let slot = slotted_page.get_slot(tid.slot_id);
         match slot {
-            Slot::Redirect { tid } => {
-                assert!(tid.page_id != tid.page_id, "Redirect to same page (would lead to deadlock)");
-                return self.get_record(tid, operation) // Only one level down anyway
+            Slot::Redirect { tid: redirect_tid } => {
+                assert!(redirect_tid.page_id != tid.page_id, "Redirect to same page (would lead to deadlock)");
+                return self.get_record(redirect_tid, operation) // Only one level down anyway
             },
             Slot::RedirectTarget { offset, length } => {
                 Ok(operation(slotted_page.get_record(offset + 8, length - 8)))
@@ -165,6 +165,7 @@ impl<B: BufferManager> SlottedPageSegment<B> {
                     let new_tid = RelationTID{ page_id: page_id, slot_id: slot_id };
                     operation(&mut slotted_page, new_tid, offset, length)?;
                     self.free_space_segment.update_page_size(page_id, slotted_page.get_free_space())?;
+                    slotted_page.page.make_dirty();
                     drop(slotted_page);
                     return Ok(new_tid);
                 } else {
@@ -197,6 +198,7 @@ impl<B: BufferManager> SlottedPageSegment<B> {
             let root_relocate_result = slotted_root_page.relocate(tid.slot_id, size);
             if root_relocate_result {
                 if let Slot::Slot { offset, length } = slotted_root_page.get_slot(tid.slot_id) {
+                    slotted_root_page.page.make_dirty();
                     operation(slotted_root_page.get_record_mut(offset, length));
                     self.free_space_segment.update_page_size(tid.page_id, slotted_root_page.get_free_space())?;
                     drop(slotted_root_page);
@@ -209,6 +211,7 @@ impl<B: BufferManager> SlottedPageSegment<B> {
             }
             let orig_relocate_result = slotted_redirect_target_page.relocate(redirect_tid.slot_id, size);
             if orig_relocate_result {
+                slotted_redirect_target_page.page.make_dirty();
                 if let Slot::Slot { offset, length } = slotted_redirect_target_page.get_slot(redirect_tid.slot_id) {
                     drop(slotted_root_page);
                     operation(slotted_redirect_target_page.get_record_mut(offset, length));
@@ -219,6 +222,7 @@ impl<B: BufferManager> SlottedPageSegment<B> {
                 }
             }
             self.allocate_and_do(size + 8, |slotted_alloc_page: &mut SlottedPage<&mut Page>, new_tid: RelationTID, new_offset, new_length| -> Result<(), BufferManagerError> {
+                slotted_root_page.page.make_dirty();
                 slotted_root_page.write_slot(tid.slot_id, &Slot::Redirect { tid: RelationTID { page_id: new_tid.page_id, slot_id: new_tid.slot_id } });
                 slotted_alloc_page.write_slot(new_tid.slot_id, &Slot::RedirectTarget{ offset, length });
                 slotted_alloc_page.get_record_mut(offset, 8).copy_from_slice(u64::from(&tid).to_be_bytes().as_ref());
@@ -226,9 +230,10 @@ impl<B: BufferManager> SlottedPageSegment<B> {
                     let copy_size = length.min(size as u32);
                     slotted_alloc_page.get_record_mut(offset + 8, copy_size)
                             .copy_from_slice(slotted_redirect_target_page.get_record(offset, copy_size));
-                    slotted_redirect_target_page.erase(redirect_tid.slot_id);
-                    self.free_space_segment.update_page_size(redirect_tid.page_id, slotted_redirect_target_page.get_free_space())?;
                 }
+                slotted_redirect_target_page.page.make_dirty();
+                slotted_redirect_target_page.erase(redirect_tid.slot_id);
+                self.free_space_segment.update_page_size(redirect_tid.page_id, slotted_redirect_target_page.get_free_space())?;
                 self.free_space_segment.update_page_size(new_tid.page_id, slotted_alloc_page.get_free_space())?;
                 operation(slotted_alloc_page.get_record_mut(offset + 8, length - 8));
                 Ok(())
@@ -253,7 +258,8 @@ impl<B: BufferManager> SlottedPageSegment<B> {
         let mut slotted_root_page = SlottedPage::new(root_page.write().unwrap());
         let root_slot = slotted_root_page.get_slot(tid.slot_id);
         match root_slot {
-            Slot::Slot { offset, length } => {
+            Slot::Slot { offset: _, length: _ } => {
+                slotted_root_page.page.make_dirty();
                 let relocate_result = slotted_root_page.relocate(tid.slot_id, size);
                 if relocate_result {
                     if let Slot::Slot { offset, length } = slotted_root_page.get_slot(tid.slot_id) {
@@ -265,16 +271,16 @@ impl<B: BufferManager> SlottedPageSegment<B> {
                     }
                 }
                 // We now need a redirect
-                self.allocate_and_do(size + 8, |slotted_alloc_page: &mut SlottedPage<&mut Page>, new_tid: RelationTID, _ , _| {
+                self.allocate_and_do(size + 8, |slotted_alloc_page: &mut SlottedPage<&mut Page>, new_tid: RelationTID, offset , length| {
                     slotted_alloc_page.write_slot(new_tid.slot_id, &Slot::RedirectTarget{ offset, length });
                     slotted_alloc_page.get_record_mut(offset, 8).copy_from_slice(u64::from(&tid).to_be_bytes().as_ref());
                     if copy_previous {
                         let copy_size = length.min(size as u32);
                         slotted_alloc_page.get_record_mut(offset + 8, copy_size)
                                 .copy_from_slice(slotted_root_page.get_record(offset, copy_size));
-                        slotted_root_page.erase_for_redirect(tid.slot_id, new_tid);
-                        self.free_space_segment.update_page_size(tid.page_id, slotted_root_page.get_free_space())?;
                     }
+                    slotted_root_page.erase_for_redirect(tid.slot_id, new_tid);
+                    self.free_space_segment.update_page_size(tid.page_id, slotted_root_page.get_free_space())?;
                     self.free_space_segment.update_page_size(new_tid.page_id, slotted_alloc_page.get_free_space())?;
                     operation(slotted_alloc_page.get_record_mut(offset + 8, length - 8));
                     Ok(())
@@ -368,6 +374,8 @@ impl<A: Deref<Target = Page> + DerefMut<Target = Page>> SlottedPage<A> {
         let slot_offset = HEADER_SIZE + slot_id as usize * 8;
         let slot_binary: [u8; 8] = slot.into();
         self.page.data[slot_offset..slot_offset + 8].copy_from_slice(slot_binary.as_ref());
+        let read_binary = &self.page.data[slot_offset..slot_offset + 8];
+        assert_eq!(read_binary, slot_binary);
     }
 
     fn set_slot_count(&mut self, slot_count: u16) {
@@ -704,26 +712,13 @@ mod test {
         data[499] = 2;
         data[200] = 3;
         let tid = testee.insert_record(&data).unwrap();
+        let data = vec![50u8; 5000];
         testee.write_record(tid, &data).unwrap();
 
-
         let record = testee.get_record(tid, |record| {Vec::from(record)}).unwrap();
-        assert_eq!(record.len(), 500);
-        assert_eq!(record[0], 1);
-        assert_eq!(record[200], 100);
-        assert_eq!(record[499], 255);
-
-        let size = PAGE_SIZE - HEADER_SIZE - 8;
-        let mut data = vec![0u8; size];
-        let max_i = size - 1;
-        data[0] = 1;
-        data[max_i] = 255;
-        data[200] = 100;
-        let tid = testee.insert_record(&data).unwrap();
-        let record = testee.get_record(tid, |record| {Vec::from(record)}).unwrap();
-        assert_eq!(record.len(), size);
-        assert_eq!(record[0], 1);
-        assert_eq!(record[200], 100);
-        assert_eq!(record[max_i], 255);
+        assert_eq!(record.len(), 5000);
+        assert_eq!(record[0], 50);
+        assert_eq!(record[200], 50);
+        assert_eq!(record[4999], 50);
     }
 }

@@ -312,7 +312,9 @@ pub mod mock {
             if let Some(page) = page {
                 Ok(page.clone())
             } else {
-                segments.insert(page_id.segment_id, HashMap::new());
+                if !segments.contains_key(&page_id.segment_id) {
+                    segments.insert(page_id.segment_id, HashMap::new());
+                }
                 let new_page = new_page(page_id);
                 let mut new_page_guard = new_page.write().unwrap();
                 new_page_guard.data = alligned_slice(self.page_size, 1);
