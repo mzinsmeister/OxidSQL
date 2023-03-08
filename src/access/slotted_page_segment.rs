@@ -209,16 +209,16 @@ impl<B: BufferManager> SlottedPageSegment<B> {
                     panic!("Successful relocate should have kept it a slot");
                 }
             }
-            let orig_relocate_result = slotted_redirect_target_page.relocate(redirect_tid.slot_id, size);
+            let orig_relocate_result = slotted_redirect_target_page.relocate(redirect_tid.slot_id, size + 8);
             if orig_relocate_result {
                 slotted_redirect_target_page.page.make_dirty();
-                if let Slot::Slot { offset, length } = slotted_redirect_target_page.get_slot(redirect_tid.slot_id) {
+                if let Slot::RedirectTarget { offset, length } = slotted_redirect_target_page.get_slot(redirect_tid.slot_id) {
                     drop(slotted_root_page);
-                    operation(slotted_redirect_target_page.get_record_mut(offset, length));
+                    operation(slotted_redirect_target_page.get_record_mut(offset + 8, length - 8));
                     self.free_space_segment.update_page_size(redirect_tid.page_id, slotted_redirect_target_page.get_free_space())?;
                     return Ok(());
                 } else {
-                    panic!("Successful relocate should have kept it a slot");
+                    panic!("Successful relocate should have kept it a redirect target");
                 }
             }
             self.allocate_and_do(size + 8, |slotted_alloc_page: &mut SlottedPage<&mut Page>, new_tid: RelationTID, new_offset, new_length| -> Result<(), BufferManagerError> {
@@ -502,7 +502,7 @@ impl<A: Deref<Target = Page> + DerefMut<Target = Page>> SlottedPage<A> {
                     if size as u32 - length > self.get_free_space() {
                         return false;
                     }
-                    let buffer = self.get_record(offset, size as u32).to_vec();
+                    let buffer = self.get_record(offset, (length).min(size as u32)).to_vec();
                     self.write_slot(slot_id, &Slot::Free);
                     if self.get_fragmented_free_space() < size {
                         self.compactify();
@@ -515,7 +515,7 @@ impl<A: Deref<Target = Page> + DerefMut<Target = Page>> SlottedPage<A> {
                             self.write_slot(slot_id, &Slot::new_redirect_target(new_data_start, size as u32)),
                         _ => unreachable!()
                     }
-                    let tuple_mut = self.get_record_mut(new_data_start, size as u32);
+                    let tuple_mut = self.get_record_mut(new_data_start, (size as u32).min(length));
                     tuple_mut.copy_from_slice(buffer.as_slice());
                     self.set_data_start(new_data_start);
                     self.set_free_space(self.get_free_space() + (size - length as usize) as u32);
@@ -721,4 +721,77 @@ mod test {
         assert_eq!(record[200], 50);
         assert_eq!(record[4999], 50);
     }
+
+    #[test]
+    fn update_with_redirect_back_to_root() {
+        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let testee = SlottedPageSegment::new(bm, 1, 0);
+        let data = vec![10u8; PAGE_SIZE - 2000];
+        testee.insert_record(&data).unwrap();
+        let mut data = vec![0u8; 500];
+        data[0] = 1;
+        data[499] = 2;
+        data[200] = 3;
+        let tid = testee.insert_record(&data).unwrap();
+        let data = vec![50u8; 5000];
+        testee.write_record(tid, &data).unwrap();
+        let data = vec![40u8; 50];
+        testee.write_record(tid, &data).unwrap();
+
+        let record = testee.get_record(tid, |record| {Vec::from(record)}).unwrap();
+        assert_eq!(record.len(), 50);
+        assert_eq!(record[0], 40);
+        assert_eq!(record[20], 40);
+        assert_eq!(record[49], 40);
+    }
+
+    #[test]
+    fn update_with_relocate_on_redirect_page() {
+        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let testee = SlottedPageSegment::new(bm, 1, 0);
+        let data = vec![10u8; PAGE_SIZE - 2000];
+        testee.insert_record(&data).unwrap();
+        let mut data = vec![0u8; 500];
+        data[0] = 1;
+        data[499] = 2;
+        data[200] = 3;
+        let tid = testee.insert_record(&data).unwrap();
+        let data = vec![50u8; 5000];
+        testee.write_record(tid, &data).unwrap();
+        let data = vec![40u8; 8000];
+        testee.write_record(tid, &data).unwrap();
+
+        let record = testee.get_record(tid, |record| {Vec::from(record)}).unwrap();
+        assert_eq!(record.len(), 8000);
+        assert_eq!(record[0], 40);
+        assert_eq!(record[2000], 40);
+        assert_eq!(record[7999], 40);
+    }
+
+    #[test]
+    fn update_with_relocate_from_redirect_to_different_redirect() {
+        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let testee = SlottedPageSegment::new(bm, 1, 0);
+        let data = vec![10u8; PAGE_SIZE - 2000];
+        testee.insert_record(&data).unwrap();
+        let mut data = vec![0u8; 500];
+        data[0] = 1;
+        data[499] = 2;
+        data[200] = 3;
+        let tid = testee.insert_record(&data).unwrap();
+        let data = vec![50u8; 5000];
+        testee.write_record(tid, &data).unwrap();
+        let data = vec![100u8; 10000];
+        testee.insert_record(&data).unwrap();
+        let data = vec![40u8; 8000];
+        testee.write_record(tid, &data).unwrap();
+
+        let record = testee.get_record(tid, |record| {Vec::from(record)}).unwrap();
+        assert_eq!(record.len(), 8000);
+        assert_eq!(record[0], 40);
+        assert_eq!(record[2000], 40);
+        assert_eq!(record[7999], 40);
+    }
+
+    // TODO: Check if dirty flag is correctly set everywhere
 }
