@@ -105,6 +105,10 @@ pub struct SlottedPageSegment<B: BufferManager> {
 }
 
 impl<B: BufferManager> SlottedPageSegment<B> {
+    fn max_useable_space(&self) -> usize {
+        PAGE_SIZE - HEADER_SIZE - SLOT_SIZE
+    }
+
     pub fn new(bm: Arc<B>, segment_id: u16, free_space_segment_id: u16) -> SlottedPageSegment<B> {
         SlottedPageSegment {
             bm: bm.clone(),
@@ -246,7 +250,7 @@ impl<B: BufferManager> SlottedPageSegment<B> {
     }
 
     fn resize_and_do<F: Fn(&mut [u8])>(&self, tid: RelationTID, size: usize, copy_previous: bool, operation: F) -> Result<(), BufferManagerError> {
-        if size > PAGE_SIZE - HEADER_SIZE {
+        if size > self.max_useable_space() {
             panic!("Data too large for page"); // Caller is responsible for 
         }
         // We have at most three pages at play here:
@@ -884,6 +888,4 @@ mod test {
         assert!(bm.fix_page(PageId::new(1, tid.page_id + 1)).unwrap().try_write().unwrap().state.is_dirtyish());
         assert!(bm.fix_page(PageId::new(1, tid.page_id + 2)).unwrap().try_write().unwrap().state.is_dirtyish());
     }
-
-    // TODO: Check if dirty flag is correctly set everywhere
 }
