@@ -203,6 +203,7 @@ impl<B: BufferManager> SlottedPageSegment<B> {
                     self.free_space_segment.update_page_size(tid.page_id, slotted_root_page.get_free_space())?;
                     drop(slotted_root_page);
                     slotted_redirect_target_page.erase(redirect_tid.slot_id);
+                    slotted_redirect_target_page.page.make_dirty();
                     self.free_space_segment.update_page_size(redirect_tid.page_id, slotted_redirect_target_page.get_free_space())?;
                     return Ok(());
                 } else {
@@ -224,7 +225,7 @@ impl<B: BufferManager> SlottedPageSegment<B> {
             self.allocate_and_do(size + 8, |slotted_alloc_page: &mut SlottedPage<&mut Page>, new_tid: RelationTID, new_offset, new_length| -> Result<(), BufferManagerError> {
                 slotted_root_page.page.make_dirty();
                 slotted_root_page.write_slot(tid.slot_id, &Slot::Redirect { tid: RelationTID { page_id: new_tid.page_id, slot_id: new_tid.slot_id } });
-                slotted_alloc_page.write_slot(new_tid.slot_id, &Slot::RedirectTarget{ offset, length });
+                slotted_alloc_page.write_slot(new_tid.slot_id, &Slot::RedirectTarget{ offset: new_offset, length: new_length });
                 slotted_alloc_page.get_record_mut(offset, 8).copy_from_slice(u64::from(&tid).to_be_bytes().as_ref());
                 if copy_previous {
                     let copy_size = length.min(size as u32);
@@ -235,7 +236,7 @@ impl<B: BufferManager> SlottedPageSegment<B> {
                 slotted_redirect_target_page.erase(redirect_tid.slot_id);
                 self.free_space_segment.update_page_size(redirect_tid.page_id, slotted_redirect_target_page.get_free_space())?;
                 self.free_space_segment.update_page_size(new_tid.page_id, slotted_alloc_page.get_free_space())?;
-                operation(slotted_alloc_page.get_record_mut(offset + 8, length - 8));
+                operation(slotted_alloc_page.get_record_mut(new_offset + 8, new_length - 8));
                 Ok(())
             }, |page_id| page_id != tid.page_id && page_id != redirect_tid.page_id)?;
             Ok(())
@@ -564,7 +565,7 @@ impl<A: Deref<Target = Page> + DerefMut<Target = Page>> SlottedPage<A> {
 mod test {
     use std::sync::Arc;
 
-    use crate::{storage::{buffer_manager::mock::MockBufferManager, page::PAGE_SIZE}, access::{slotted_page_segment::HEADER_SIZE}};
+    use crate::{storage::{buffer_manager::{mock::MockBufferManager, BufferManager}, page::{PAGE_SIZE, PageId, PageState}}, access::{slotted_page_segment::HEADER_SIZE}};
 
     use super::SlottedPageSegment;
 
@@ -599,6 +600,16 @@ mod test {
         assert_eq!(record[0], 1);
         assert_eq!(record[200], 100);
         assert_eq!(record[499], 255);
+    }
+
+    #[test]
+    fn write_dirties_page() {
+        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let testee = SlottedPageSegment::new(bm.clone(), 1, 0);
+        let data = vec![0u8; 500];
+        let tid = testee.insert_record(&data).unwrap();
+        let page = bm.fix_page(PageId::new(1, tid.page_id)).unwrap();
+        assert!(page.try_read().unwrap().state.is_dirtyish());
     }
 
     #[test]
@@ -690,6 +701,19 @@ mod test {
     }
 
     #[test]
+    fn allocate_max_twice_dirties_only_second() {
+        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let testee = SlottedPageSegment::new(bm.clone(), 1, 0);
+        let size = PAGE_SIZE - HEADER_SIZE - 8;
+        let data = vec![0u8; size];
+        let tid1 = testee.insert_record(&data).unwrap();
+        bm.fix_page(PageId::new(1, tid1.page_id)).unwrap().try_write().unwrap().state = PageState::CLEAN;
+        let tid2 = testee.insert_record(&data).unwrap();
+        assert!(!bm.fix_page(PageId::new(1, tid1.page_id)).unwrap().try_write().unwrap().state.is_dirtyish());
+        assert!(bm.fix_page(PageId::new(1, tid2.page_id)).unwrap().try_write().unwrap().state.is_dirtyish());
+    }
+
+    #[test]
     fn allocate_max_second_gives_differnt_pages() {
         let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
         let testee = SlottedPageSegment::new(bm, 1, 0);
@@ -721,6 +745,20 @@ mod test {
         assert_eq!(record[200], 50);
         assert_eq!(record[4999], 50);
     }
+    
+    #[test]
+    fn update_with_redirect_dirties_both() {
+        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let testee = SlottedPageSegment::new(bm.clone(), 1, 0);
+        let data = vec![10u8; PAGE_SIZE - 2000];
+        let tid1 = testee.insert_record(&data).unwrap();
+        bm.fix_page(PageId::new(1, tid1.page_id)).unwrap().try_write().unwrap().state = PageState::CLEAN;
+        testee.insert_record(&data).unwrap();
+        let data = vec![50u8; 5000];
+        testee.write_record(tid1, &data).unwrap();
+        assert!(bm.fix_page(PageId::new(1, tid1.page_id)).unwrap().try_write().unwrap().state.is_dirtyish());
+        assert!(bm.fix_page(PageId::new(1, tid1.page_id + 1)).unwrap().try_write().unwrap().state.is_dirtyish());
+    }
 
     #[test]
     fn update_with_redirect_back_to_root() {
@@ -743,6 +781,24 @@ mod test {
         assert_eq!(record[0], 40);
         assert_eq!(record[20], 40);
         assert_eq!(record[49], 40);
+    }
+
+   #[test]
+    fn update_with_redirect_back_to_root_dirties_both() {
+        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let testee = SlottedPageSegment::new(bm.clone(), 1, 0);
+        let data = vec![10u8; PAGE_SIZE - 2000];
+        let tid1 = testee.insert_record(&data).unwrap();
+        let data = vec![0u8; 500];
+        let tid2 = testee.insert_record(&data).unwrap();
+        let data = vec![50u8; 5000];
+        testee.write_record(tid2, &data).unwrap();
+        bm.fix_page(PageId::new(1, tid1.page_id)).unwrap().try_write().unwrap().state = PageState::CLEAN;
+        bm.fix_page(PageId::new(1, tid1.page_id + 1)).unwrap().try_write().unwrap().state = PageState::CLEAN;
+        let data = vec![40u8; 50];
+        testee.write_record(tid2, &data).unwrap();
+        assert!(bm.fix_page(PageId::new(1, tid2.page_id)).unwrap().try_write().unwrap().state.is_dirtyish());
+        assert!(bm.fix_page(PageId::new(1, tid2.page_id + 1)).unwrap().try_write().unwrap().state.is_dirtyish());
     }
 
     #[test]
@@ -769,28 +825,64 @@ mod test {
     }
 
     #[test]
+    fn update_with_relocate_on_redirect_page_dirties_only_relocate_page() {
+        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let testee = SlottedPageSegment::new(bm.clone(), 1, 0);
+        let data = vec![10u8; PAGE_SIZE - 2000];
+        testee.insert_record(&data).unwrap();
+        let data = vec![0u8; 500];
+        let tid = testee.insert_record(&data).unwrap();
+        let data = vec![50u8; 5000];
+        testee.write_record(tid, &data).unwrap();
+        bm.fix_page(PageId::new(1, tid.page_id)).unwrap().try_write().unwrap().state = PageState::CLEAN;
+        let data = vec![40u8; 8000];
+        testee.write_record(tid, &data).unwrap();
+        assert!(!bm.fix_page(PageId::new(1, tid.page_id)).unwrap().try_write().unwrap().state.is_dirtyish());
+        assert!(bm.fix_page(PageId::new(1, tid.page_id + 1)).unwrap().try_write().unwrap().state.is_dirtyish());
+    }
+
+    #[test]
     fn update_with_relocate_from_redirect_to_different_redirect() {
         let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
         let testee = SlottedPageSegment::new(bm, 1, 0);
         let data = vec![10u8; PAGE_SIZE - 2000];
         testee.insert_record(&data).unwrap();
-        let mut data = vec![0u8; 500];
-        data[0] = 1;
-        data[499] = 2;
-        data[200] = 3;
+        let data = vec![0u8; 500];
         let tid = testee.insert_record(&data).unwrap();
         let data = vec![50u8; 5000];
         testee.write_record(tid, &data).unwrap();
-        let data = vec![100u8; 10000];
+        let data = vec![100u8; 5000];
         testee.insert_record(&data).unwrap();
-        let data = vec![40u8; 8000];
+        let data = vec![40u8; PAGE_SIZE - 2000];
         testee.write_record(tid, &data).unwrap();
 
         let record = testee.get_record(tid, |record| {Vec::from(record)}).unwrap();
-        assert_eq!(record.len(), 8000);
+        assert_eq!(record.len(), PAGE_SIZE - 2000);
         assert_eq!(record[0], 40);
         assert_eq!(record[2000], 40);
         assert_eq!(record[7999], 40);
+    }
+
+    #[test]
+    fn update_with_relocate_from_redirect_to_different_redirect_dirties_all_three() {
+        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let testee = SlottedPageSegment::new(bm.clone(), 1, 0);
+        let data = vec![10u8; PAGE_SIZE - 2000];
+        testee.insert_record(&data).unwrap();
+        let data = vec![0u8; 500];
+        let tid = testee.insert_record(&data).unwrap();
+        let data = vec![50u8; 5000];
+        testee.write_record(tid, &data).unwrap();
+        let data = vec![100u8; 5000];
+        testee.insert_record(&data).unwrap();
+        bm.fix_page(PageId::new(1, tid.page_id)).unwrap().try_write().unwrap().state = PageState::CLEAN;
+        bm.fix_page(PageId::new(1, tid.page_id + 1)).unwrap().try_write().unwrap().state = PageState::CLEAN;
+        let data = vec![40u8; PAGE_SIZE - 2000];
+        testee.write_record(tid, &data).unwrap();
+
+        assert!(bm.fix_page(PageId::new(1, tid.page_id)).unwrap().try_write().unwrap().state.is_dirtyish());
+        assert!(bm.fix_page(PageId::new(1, tid.page_id + 1)).unwrap().try_write().unwrap().state.is_dirtyish());
+        assert!(bm.fix_page(PageId::new(1, tid.page_id + 2)).unwrap().try_write().unwrap().state.is_dirtyish());
     }
 
     // TODO: Check if dirty flag is correctly set everywhere
