@@ -18,7 +18,8 @@ pub fn alligned_slice(size: usize, align: usize) -> Box<[u8]> {
 }
 
 
-
+/// Safe representation of an aligned slice.
+/// Likely uses more memory (will waste something like 3% for 16kb pages)
 #[cfg(all(unix, not(feature="allow-unsafe")))]
 #[derive(Debug, Clone)]
 pub struct AlignedSlice{

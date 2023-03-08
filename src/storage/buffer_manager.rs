@@ -8,9 +8,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock, Mutex, MutexGuard};
 
 use super::disk::StorageManager;
-use super::page::{PageId, RelationIdType, PAGE_SIZE, self};
+use super::page::{PageId, RelationIdType, PAGE_SIZE};
 use super::replacer::Replacer;
 
+// TODO: Abstract this away so that e.g. optimistic latches could be used.
+//       Most likely to something that takes an idempotent lambda would be best.
 pub type PageType = Arc<RwLock<Page>>;
 // Self built (kinda) chaining hash table but with a Vec because Rusts LinkedList is useless
 pub(super) type PageTableType = Vec<Mutex<PageTableBucket>>; 
@@ -81,12 +83,14 @@ impl PageTableBucket {
           Virtual Memory assisted Buffer Management (vmcache)
           (https://www.cs.cit.tum.de/fileadmin/w00cfj/dis/_my_direct_uploads/vmcache.pdf)
           which should offer a rather good performance for real world workloads that are mainly 
-          in-memory and isn't as invasive as the LeanStore approach.
+          in-memory and isn't as invasive as the LeanStore approach. Maybe try a hybrid approach
+          with a vmcache and a hashtable based buffer manager and try to get hot pages into the 
+          vmcache and pages which are only infrequently accessed into the hashtable 
+          based buffer manager.
  */
 
 pub trait BufferManager: Sync + Send {
-    fn get_page(&self, page_id: PageId) -> Result<PageType, BufferManagerError>;
-    fn get_total_num_pages(&self, segment_id: RelationIdType) -> u64;
+    fn fix_page(&self, page_id: PageId) -> Result<PageType, BufferManagerError>;
     fn flush(&self) -> Result<(), BufferManagerError>;
 }
 
@@ -238,7 +242,7 @@ impl<R: Replacer + Send, S: StorageManager> HashTableBufferManager<R, S> {
 }
 
 impl<R: Replacer + Send, S: StorageManager> BufferManager for HashTableBufferManager<R,S> {
-    fn get_page(&self, page_id: PageId) -> Result<PageType, BufferManagerError> {
+    fn fix_page(&self, page_id: PageId) -> Result<PageType, BufferManagerError> {
         let page_bucket = self.pagetable[self.get_pagetable_index(page_id)].lock().unwrap();
         let page = if let Some(result) = page_bucket.get(page_id) {
             drop(page_bucket);
@@ -253,10 +257,6 @@ impl<R: Replacer + Send, S: StorageManager> BufferManager for HashTableBufferMan
         // TODO: HACK(kinda): To avoid key not found panics for new pages that are currently beeing loaded
         //       we currently only set the used flag if the page is actually there
         Ok(page)
-    }
-
-    fn get_total_num_pages(&self, segment_id: RelationIdType) -> u64 {
-        self.disk_manager.get_relation_size(segment_id)
     }
 
     fn flush(&self) -> Result<(), BufferManagerError> {
@@ -304,7 +304,7 @@ pub mod mock {
     }
 
     impl BufferManager for MockBufferManager {
-        fn get_page(&self, page_id: PageId) -> Result<PageType, super::BufferManagerError> {
+        fn fix_page(&self, page_id: PageId) -> Result<PageType, super::BufferManagerError> {
             let mut segments = self.segments.lock().unwrap();
             let page = segments
                 .get(&page_id.segment_id)
@@ -320,10 +320,6 @@ pub mod mock {
                 segments.get_mut(&page_id.segment_id).unwrap().insert(page_id.offset_id, new_page);
                 Ok(segments[&page_id.segment_id][&page_id.offset_id].clone())
             }
-        }
-
-        fn get_total_num_pages(&self, segment_id: u16) -> u64 {
-            self.segments.lock().unwrap()[&segment_id].len() as u64
         }
 
         fn flush(&self) -> Result<(), super::BufferManagerError> {
@@ -356,7 +352,7 @@ mod tests {
         let datadir = tempfile::tempdir().unwrap();
         let disk_manager = DiskManager::new(datadir.into_path());
         let bpm = HashTableBufferManager::new(disk_manager, ClockReplacer::new(), 10);
-        let page = bpm.get_page(PageId::new(1,1)).unwrap();
+        let page = bpm.fix_page(PageId::new(1,1)).unwrap();
         let page = page.try_read().unwrap();
         assert_eq!(page.state, PageState::NEW);
         assert_eq!(page.data.len(), PAGE_SIZE);
@@ -378,7 +374,7 @@ mod tests {
             - Write a parser from scratch
  */   let disk_manager = DiskManager::new(datadir_path.clone());
         let bpm = HashTableBufferManager::new(disk_manager, ClockReplacer::new(), 10);
-        let page = bpm.get_page(PageId::new(1,0)).unwrap();
+        let page = bpm.fix_page(PageId::new(1,0)).unwrap();
         let mut page_write = page.try_write().unwrap();
         fill_page(PageId::new(1,0), &mut page_write);
         drop(page_write);
@@ -386,7 +382,7 @@ mod tests {
         drop(bpm);
         let disk_manager = DiskManager::new(datadir_path);
         let bpm = HashTableBufferManager::new(disk_manager, ClockReplacer::new(), 10);
-        let page = bpm.get_page(PageId::new(1,0)).unwrap();
+        let page = bpm.fix_page(PageId::new(1,0)).unwrap();
         let page_read = page.try_read().unwrap();
         assert_page(PageId::new(1, 0), &page_read)
     }
@@ -403,8 +399,8 @@ mod tests {
         replacer_mock.expect_swap_pages().return_const(());
         replacer_mock.expect_has_page().return_const(true);
         let bpm = HashTableBufferManager::new(disk_manager, replacer_mock, 1);
-        let _page = bpm.get_page(PageId::new(1,1)).unwrap();
-        let _page2 = bpm.get_page(PageId::new(1, 2)).unwrap();
+        let _page = bpm.fix_page(PageId::new(1,1)).unwrap();
+        let _page2 = bpm.fix_page(PageId::new(1, 2)).unwrap();
         let pages = bpm.get_buffered_pages();
         assert_eq!(pages.len(), 1);
         assert_eq!(pages[0].try_read().unwrap().id, PageId::new(1, 2));
@@ -425,12 +421,12 @@ mod tests {
         replacer_mock.expect_swap_pages().return_const(());
         replacer_mock.expect_has_page().return_const(true);
         let bpm = HashTableBufferManager::new(disk_manager, replacer_mock, 1);
-        let page = bpm.get_page(PageId::new(1,1)).unwrap();
+        let page = bpm.fix_page(PageId::new(1,1)).unwrap();
         let mut page_write = page.try_write().unwrap();
         fill_page(PageId::new(1, 1), &mut page_write);
         drop(page_write);
-        let _page2 = bpm.get_page(PageId::new(1, 2)).unwrap();
-        let page1 = bpm.get_page(PageId::new(1,1)).unwrap();
+        let _page2 = bpm.fix_page(PageId::new(1, 2)).unwrap();
+        let page1 = bpm.fix_page(PageId::new(1,1)).unwrap();
         let page1_read = page1.try_read().unwrap();
         assert_page(PageId::new(1, 1), &page1_read);
     }
@@ -461,7 +457,7 @@ mod tests {
                         // create new
                         let next_offset_id = next_offset_id.fetch_add(1, Ordering::Relaxed) as u64;
                         let page_id = PageId::new(1, next_offset_id);
-                        let page = bpm.get_page(page_id).unwrap();
+                        let page = bpm.fix_page(page_id).unwrap();
                         let mut page_write = page.write().unwrap();
                         let mut pages_write = pages.write().unwrap();
                         pages_write.push(page_id);
@@ -477,7 +473,7 @@ mod tests {
                         let pages_read = pages.read().unwrap();
                         let page_id = pages_read.get(r as usize % pages_read.len()).unwrap().clone();
                         drop(pages_read);
-                        let page = bpm.get_page(page_id).unwrap();
+                        let page = bpm.fix_page(page_id).unwrap();
                         let mut page_write = page.write().unwrap();
                         let id_slice = page_id.offset_id.to_be_bytes();
                         page_write.data[0..8].copy_from_slice(&id_slice);
@@ -488,7 +484,7 @@ mod tests {
                         let pages_read = pages.read().unwrap();
                         let page_id = pages_read.get(r as usize % pages_read.len()).unwrap().clone();
                         drop(pages_read);
-                        let page = bpm.get_page(page_id).unwrap();
+                        let page = bpm.fix_page(page_id).unwrap();
                         let page_read = page.read().unwrap();
                         let read_id = u64::from_be_bytes(page_read.data[0..8].try_into().unwrap());
                         assert_eq!(read_id, page_id.offset_id);
@@ -501,7 +497,7 @@ mod tests {
         }
         for offset_id in 0..page_counter.load(Ordering::Acquire) as u64 {
             let page_id = PageId::new(1, offset_id);
-            let page = bpm.get_page(page_id).unwrap();
+            let page = bpm.fix_page(page_id).unwrap();
             let page_read = page.read().unwrap();
             assert_eq!(u64::from_be_bytes(page_read.data[0..8].try_into().unwrap()), page_id.offset_id);
         }

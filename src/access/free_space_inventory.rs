@@ -28,6 +28,10 @@ be enough for terrabytes of data since you will likely only read a few hundred a
 good/average case you will likely have all your pages towards the end of the segment so that you will only have to
 read a handful of pages at most. Linear search is very cache friendly and therefore very fast anyway. We won't have
 to do any calculations in the loop that does the linear search because the encoding function is monotonic.
+
+If this ever gets too slow or we get problems with too many inserts getting contention on the free space inventory
+or the pages they get we could group pages by mod 100 for example and go around them clockwise with every request
+coming in.
 */
 pub struct FreeSpaceSegment<B: BufferManager> {
     bm: Arc<B>,
@@ -41,7 +45,7 @@ impl<B: BufferManager> FreeSpaceSegment<B> {
     }
 
     fn write_cache_for_size_class(page: &mut Page, size_class: u8, page_nr: u64) {
-        // Every page has at least size_class 15
+        // Every page has at most size_class 15
         if size_class < 15 {
             page.data[size_class as usize * 8..(size_class as usize + 1) * 8]
             .copy_from_slice(&page_nr.to_le_bytes());
@@ -75,20 +79,20 @@ impl<B: BufferManager> FreeSpaceSegment<B> {
         }
     }
 
-    pub fn find_page(&self, size: u16) -> Result<OffsetId, BufferManagerError> {
+    pub fn find_page(&self, size: u32) -> Result<OffsetId, BufferManagerError> {
         // Page must have at most one less than this size class except for empty pages
         let encoded = self.encode(self.max_useable_space - size as usize).max(1) - 1; 
-        let page = self.bm.get_page(PageId::new(self.segment_id, 0))?;
+        let page = self.bm.fix_page(PageId::new(self.segment_id, 0))?;
         let page_read = page.read().unwrap();
         Ok(Self::read_cache_for_size_class(&page_read, encoded))
     }
 
-    pub fn update_page_size(&self, page_nr: u64, size: u16) -> Result<(), BufferManagerError> {
+    pub fn update_page_size(&self, page_nr: u64, size: u32) -> Result<(), BufferManagerError> {
         // Page must have at most this size class
         let size_nibble = self.encode(self.max_useable_space - size as usize);
         let fsi_page = (page_nr + 15*16) / (PAGE_SIZE as u64 * 2);
         let nibble_id = (page_nr + 15*16) % (PAGE_SIZE as u64 * 2);
-        let page = self.bm.get_page(PageId::new(self.segment_id, 0))?; 
+        let page = self.bm.fix_page(PageId::new(self.segment_id, 0))?; 
         let mut page_write = page.write().unwrap();
         let previous_size = Self::read_nibble(&page_write, nibble_id);
         Self::write_nibble(&mut page_write, nibble_id, size_nibble);
@@ -98,7 +102,7 @@ impl<B: BufferManager> FreeSpaceSegment<B> {
         drop(page_write); // Fsi segment isn't guaranteed to actually give you up to date information anyway so we can unlock here
         drop(page);
         if previous_size != size_nibble && previous_size < 15 {
-            let cache_page = self.bm.get_page(PageId::new(self.segment_id, 0))?;
+            let cache_page = self.bm.fix_page(PageId::new(self.segment_id, 0))?;
             let mut cache_page_write = cache_page.write().unwrap();
             let old_class_cached = Self::read_cache_for_size_class(&cache_page_write, previous_size);
             let new_class_cached = Self::read_cache_for_size_class(&cache_page_write, size_nibble);
@@ -128,7 +132,7 @@ impl<B: BufferManager> FreeSpaceSegment<B> {
 
                 let mut page_id = fsi_page.max(1);
                 while upper_bound > previous_size {
-                    let page = self.bm.get_page(PageId::new(self.segment_id, page_id))?;
+                    let page = self.bm.fix_page(PageId::new(self.segment_id, page_id))?;
                     let page_read = page.read().unwrap();
                     for nibble in nibble_id + 1..PAGE_SIZE as u64 * 2 {
                         let size = Self::read_nibble(&page_read, nibble);
