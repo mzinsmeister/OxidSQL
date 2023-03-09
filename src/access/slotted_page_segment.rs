@@ -128,7 +128,7 @@ impl<B: BufferManager> SlottedPageSegment<B> {
     // This should be the most flexible way to implement this
     pub fn get_record<T, F: Fn(&[u8]) -> T>(&self, tid: RelationTID, operation: F) -> Result<T, BufferManagerError> {
         let page = self.bm.fix_page(PageId::new(self.segment_id, tid.page_id))?;
-        let page_read = page.read().unwrap();
+        let page_read = page.read();
         let slotted_page = SlottedPage::new(page_read);
         let slot = slotted_page.get_slot(tid.slot_id);
         match slot {
@@ -158,7 +158,7 @@ impl<B: BufferManager> SlottedPageSegment<B> {
                 continue;
             }
             let page = self.bm.fix_page(PageId::new(self.segment_id, page_id))?;
-            let mut page_write = page.write().unwrap();
+            let mut page_write = page.write();
             let mut slotted_page: SlottedPage<&mut Page> = SlottedPage::new(&mut page_write);
             if slotted_page.get_slot_count() == 0 {
                 slotted_page.initialize();
@@ -195,7 +195,7 @@ impl<B: BufferManager> SlottedPageSegment<B> {
     fn resize_and_do_redirect<F: Fn(&mut [u8]), P: DerefMut<Target=Page>>(&self, tid: RelationTID, redirect_tid: RelationTID, slotted_root_page: &mut SlottedPage<P>, 
                                                     size: usize, copy_previous: bool, operation: F) -> Result<(), BufferManagerError> {
         let redirect_target_page = self.bm.fix_page(PageId::new(self.segment_id, redirect_tid.page_id))?;
-        let redirect_target_page_write = redirect_target_page.write().unwrap();
+        let redirect_target_page_write = redirect_target_page.write();
         let mut slotted_redirect_target_page = SlottedPage::new(redirect_target_page_write);
         let orig_slot = slotted_redirect_target_page.get_slot(redirect_tid.slot_id);
         if let Slot::RedirectTarget { offset, length } = orig_slot {
@@ -260,7 +260,7 @@ impl<B: BufferManager> SlottedPageSegment<B> {
         //             (will never be root or orig because we try to relocate there first)
         let root_page_id = tid.page_id;
         let root_page = self.bm.fix_page(PageId::new(self.segment_id, root_page_id))?;
-        let mut slotted_root_page = SlottedPage::new(root_page.write().unwrap());
+        let mut slotted_root_page = SlottedPage::new(root_page.write());
         let root_slot = slotted_root_page.get_slot(tid.slot_id);
         match root_slot {
             Slot::Slot { offset: _, length: _ } => {

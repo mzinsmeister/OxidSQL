@@ -83,7 +83,7 @@ impl<B: BufferManager> FreeSpaceSegment<B> {
         // Page must have at most one less than this size class except for empty pages
         let encoded = self.encode(self.max_useable_space - size as usize).max(1) - 1; 
         let page = self.bm.fix_page(PageId::new(self.segment_id, 0))?;
-        let page_read = page.read().unwrap();
+        let page_read = page.read();
         Ok(Self::read_cache_for_size_class(&page_read, encoded))
     }
 
@@ -93,7 +93,7 @@ impl<B: BufferManager> FreeSpaceSegment<B> {
         let fsi_page = (page_nr + 15*16) / (PAGE_SIZE as u64 * 2);
         let nibble_id = (page_nr + 15*16) % (PAGE_SIZE as u64 * 2);
         let page = self.bm.fix_page(PageId::new(self.segment_id, 0))?; 
-        let mut page_write = page.write().unwrap();
+        let mut page_write = page.write();
         let previous_size = Self::read_nibble(&page_write, nibble_id);
         Self::write_nibble(&mut page_write, nibble_id, size_nibble);
         if previous_size != size_nibble {
@@ -103,7 +103,7 @@ impl<B: BufferManager> FreeSpaceSegment<B> {
         drop(page);
         if previous_size != size_nibble && previous_size < 15 {
             let cache_page = self.bm.fix_page(PageId::new(self.segment_id, 0))?;
-            let mut cache_page_write = cache_page.write().unwrap();
+            let mut cache_page_write = cache_page.write();
             let old_class_cached = Self::read_cache_for_size_class(&cache_page_write, previous_size);
             let new_class_cached = Self::read_cache_for_size_class(&cache_page_write, size_nibble);
             if old_class_cached == page_nr || new_class_cached > page_nr {
@@ -133,7 +133,7 @@ impl<B: BufferManager> FreeSpaceSegment<B> {
                 let mut page_id = fsi_page.max(1);
                 while upper_bound > previous_size {
                     let page = self.bm.fix_page(PageId::new(self.segment_id, page_id))?;
-                    let page_read = page.read().unwrap();
+                    let page_read = page.read();
                     for nibble in nibble_id + 1..PAGE_SIZE as u64 * 2 {
                         let size = Self::read_nibble(&page_read, nibble);
                         for current_size in (size.max(previous_size)..upper_bound).rev() {

@@ -1,4 +1,6 @@
-use std::{collections::HashMap, sync::{Arc, RwLock}};
+use std::{collections::HashMap, sync::{Arc}};
+
+use parking_lot::RwLock;
 
 use crate::storage::replacer::can_page_be_replaced;
 
@@ -85,7 +87,9 @@ impl Replacer for ClockReplacer {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, RwLock};
+    use std::sync::Arc;
+
+    use parking_lot::RwLock;
 
     use crate::storage::page::Page;
 

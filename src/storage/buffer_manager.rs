@@ -1,3 +1,5 @@
+use parking_lot::{RwLock, Mutex, MutexGuard};
+
 use crate::storage::page::{Page, PageState};
 use crate::util::align::alligned_slice;
 use std::collections::hash_map::DefaultHasher;
@@ -5,10 +7,10 @@ use std::error::Error;
 use std::fmt::Display;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock, Mutex, MutexGuard};
+use std::sync::Arc;
 
 use super::disk::StorageManager;
-use super::page::{PageId, RelationIdType, PAGE_SIZE};
+use super::page::{PageId, PAGE_SIZE};
 use super::replacer::Replacer;
 
 // TODO: Abstract this away so that e.g. optimistic latches could be used.
@@ -166,7 +168,7 @@ impl<R: Replacer + Send, S: StorageManager> HashTableBufferManager<R, S> {
         drop(page_bucket);
         if self.pagetable_size.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
                  |x| if x < self.size { Some(x + 1) } else { None }).is_ok() {
-            let mut replacer = self.replacer.lock().unwrap();
+            let mut replacer = self.replacer.lock();
             replacer.load_page(page_id, new_page.clone());
             drop(replacer);
             new_page_write.data = new_buffer_frame(PAGE_SIZE);
@@ -177,24 +179,24 @@ impl<R: Replacer + Send, S: StorageManager> HashTableBufferManager<R, S> {
             return Ok(new_page);     
         } else {
             loop {
-                let mut replacer = self.replacer.lock().unwrap();
+                let mut replacer = self.replacer.lock();
                 let victim_opt = replacer.find_victim();
                 drop(replacer);
                 if let Some(victim) = victim_opt {
-                    let mut victim_bucket = self.pagetable[self.get_pagetable_index(victim)].lock().unwrap();
+                    let mut victim_bucket = self.pagetable[self.get_pagetable_index(victim)].lock();
                     let victim_page = if let Some(p) = victim_bucket.get(victim) {
                         p
                     } else {
                         continue;
                     };
                     let victim_page_write_result = victim_page.try_write();
-                    if victim_page_write_result.is_ok() {
+                    if victim_page_write_result.is_some() {
                         let mut victim_page_write = victim_page_write_result.unwrap();
                         if victim_page_write.state == PageState::DIRTY {
                             drop(victim_bucket);                      
                             self.disk_manager.write_page(victim_page_write.id, &victim_page_write.data)?;
                             victim_page_write.state = PageState::CLEAN;
-                            victim_bucket = self.pagetable[self.get_pagetable_index(victim)].lock().unwrap();
+                            victim_bucket = self.pagetable[self.get_pagetable_index(victim)].lock();
                         } 
                         // Check that only we and the pagetable have a reference (noone got one in the meantime)
                         // We can't just remove the page from the pagetable before writing out to disk because otherwise someone else could
@@ -206,7 +208,7 @@ impl<R: Replacer + Send, S: StorageManager> HashTableBufferManager<R, S> {
                             // buffer replacement without any allocations
                             std::mem::swap(&mut victim_page_write.data, &mut new_page_write.data);
                             drop(victim_page_write);
-                            replacer = self.replacer.lock().unwrap();
+                            replacer = self.replacer.lock();
                             victim_bucket.remove(victim);
                             replacer.swap_pages(victim, page_id, new_page.clone());
                             replacer.use_page(page_id);
@@ -235,7 +237,7 @@ impl<R: Replacer + Send, S: StorageManager> HashTableBufferManager<R, S> {
     #[cfg(test)]
     pub fn get_buffered_pages(&self) -> Vec<PageType> { 
         self.pagetable.iter()
-                            .map(|l| l.lock().unwrap().bucket.iter().map(|(_, page)| page).cloned().collect::<Vec<PageType>>())
+                            .map(|l| l.lock().bucket.iter().map(|(_, page)| page).cloned().collect::<Vec<PageType>>())
                             .flatten()
                             .collect()
     }
@@ -243,10 +245,10 @@ impl<R: Replacer + Send, S: StorageManager> HashTableBufferManager<R, S> {
 
 impl<R: Replacer + Send, S: StorageManager> BufferManager for HashTableBufferManager<R,S> {
     fn fix_page(&self, page_id: PageId) -> Result<PageType, BufferManagerError> {
-        let page_bucket = self.pagetable[self.get_pagetable_index(page_id)].lock().unwrap();
+        let page_bucket = self.pagetable[self.get_pagetable_index(page_id)].lock();
         let page = if let Some(result) = page_bucket.get(page_id) {
             drop(page_bucket);
-            let mut replacer = self.replacer.lock().unwrap();
+            let mut replacer = self.replacer.lock();
             if replacer.has_page(page_id) {
                 replacer.use_page(page_id);
             }
@@ -261,8 +263,8 @@ impl<R: Replacer + Send, S: StorageManager> BufferManager for HashTableBufferMan
 
     fn flush(&self) -> Result<(), BufferManagerError> {
         for bucket in &self.pagetable {
-            for (_, page) in bucket.lock().unwrap().bucket.iter() {
-                let mut page = page.write().unwrap();
+            for (_, page) in bucket.lock().bucket.iter() {
+                let mut page = page.write();
                 if page.state.is_dirtyish() {
                     self.disk_manager.write_page(page.id, &page.data)?;
                     page.state = PageState::CLEAN;
@@ -283,7 +285,9 @@ impl<R: Replacer + Send, S: StorageManager> Drop for HashTableBufferManager<R, S
 
 #[cfg(test)]
 pub mod mock {
-    use std::{collections::HashMap, sync::{Mutex, RwLock}};
+    use std::{collections::HashMap};
+
+    use parking_lot::Mutex;
 
     use crate::{storage::page::{PageId, Page}, util::align::{AlignedSlice, alligned_slice}};
 
@@ -305,7 +309,7 @@ pub mod mock {
 
     impl BufferManager for MockBufferManager {
         fn fix_page(&self, page_id: PageId) -> Result<PageType, super::BufferManagerError> {
-            let mut segments = self.segments.lock().unwrap();
+            let mut segments = self.segments.lock();
             let page = segments
                 .get(&page_id.segment_id)
                 .and_then(|segment| segment.get(&page_id.offset_id));
@@ -316,7 +320,7 @@ pub mod mock {
                     segments.insert(page_id.segment_id, HashMap::new());
                 }
                 let new_page = new_page(page_id);
-                let mut new_page_guard = new_page.write().unwrap();
+                let mut new_page_guard = new_page.write();
                 new_page_guard.data = alligned_slice(self.page_size, 1);
                 drop(new_page_guard);
                 segments.get_mut(&page_id.segment_id).unwrap().insert(page_id.offset_id, new_page);
@@ -325,10 +329,10 @@ pub mod mock {
         }
 
         fn flush(&self) -> Result<(), super::BufferManagerError> {
-            let segments = self.segments.lock().unwrap();
+            let segments = self.segments.lock();
             for (_, segment) in segments.iter() {
                 for (_, page) in segment.iter() {
-                    let mut page = page.write().unwrap();
+                    let mut page = page.write();
                     if page.state.is_dirtyish() {
                         page.state = super::PageState::CLEAN;
                     }
@@ -342,7 +346,8 @@ pub mod mock {
 #[cfg(test)]
 mod tests {
 
-    use std::{path::PathBuf, thread::{self, JoinHandle}, sync::{atomic::{AtomicU32, Ordering}, Arc, RwLock}};
+    use std::{path::PathBuf, thread::{self, JoinHandle}, sync::{atomic::{AtomicU32, Ordering}, Arc}};
+    use parking_lot::RwLock;
     use rand::{Rng};
 
     use crate::storage::{disk::{DiskManager, StorageManager}, page::{PageId, PAGE_SIZE, Page, PageState}, clock_replacer::ClockReplacer, replacer::MockReplacer, buffer_manager::BufferManager};
@@ -460,8 +465,8 @@ mod tests {
                         let next_offset_id = next_offset_id.fetch_add(1, Ordering::Relaxed) as u64;
                         let page_id = PageId::new(1, next_offset_id);
                         let page = bpm.fix_page(page_id).unwrap();
-                        let mut page_write = page.write().unwrap();
-                        let mut pages_write = pages.write().unwrap();
+                        let mut page_write = page.write();
+                        let mut pages_write = pages.write();
                         pages_write.push(page_id);
                         page_counter.fetch_add(1, Ordering::Relaxed);
                         drop(pages_write);
@@ -472,22 +477,22 @@ mod tests {
                     }
                     if j % 3 == 0 {
                         // Write
-                        let pages_read = pages.read().unwrap();
+                        let pages_read = pages.read();
                         let page_id = pages_read.get(r as usize % pages_read.len()).unwrap().clone();
                         drop(pages_read);
                         let page = bpm.fix_page(page_id).unwrap();
-                        let mut page_write = page.write().unwrap();
+                        let mut page_write = page.write();
                         let id_slice = page_id.offset_id.to_be_bytes();
                         page_write.data[0..8].copy_from_slice(&id_slice);
                         page_write.data[8..16].copy_from_slice(&r.to_be_bytes());
                         page_write.state = PageState::DIRTY;
                     } else {
                         // Read
-                        let pages_read = pages.read().unwrap();
+                        let pages_read = pages.read();
                         let page_id = pages_read.get(r as usize % pages_read.len()).unwrap().clone();
                         drop(pages_read);
                         let page = bpm.fix_page(page_id).unwrap();
-                        let page_read = page.read().unwrap();
+                        let page_read = page.read();
                         let read_id = u64::from_be_bytes(page_read.data[0..8].try_into().unwrap());
                         assert_eq!(read_id, page_id.offset_id);
                     }
@@ -500,7 +505,7 @@ mod tests {
         for offset_id in 0..page_counter.load(Ordering::Acquire) as u64 {
             let page_id = PageId::new(1, offset_id);
             let page = bpm.fix_page(page_id).unwrap();
-            let page_read = page.read().unwrap();
+            let page_read = page.read();
             assert_eq!(u64::from_be_bytes(page_read.data[0..8].try_into().unwrap()), page_id.offset_id);
         }
     }

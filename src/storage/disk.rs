@@ -1,9 +1,10 @@
-use std::{fs::{File, metadata}, path::{PathBuf, Path}, io::{Seek, Read, SeekFrom, Write}, sync::{RwLock, Arc}, collections::HashMap};
+use std::{fs::{File, metadata}, path::PathBuf, sync::Arc, collections::HashMap};
 
 use super::page::{PAGE_SIZE, PageId, RelationIdType, SegmentId};
 
 #[cfg(test)]
 use mockall::{automock};
+use parking_lot::RwLock;
 
 
 #[cfg_attr(test, automock)]
@@ -44,13 +45,13 @@ impl DiskManager {
   fn open_file(&self, segment_id: RelationIdType, access: AccessType) -> File {
     use std::os::unix::prelude::OpenOptionsExt;
 
-    let file = self.file_cache.read().unwrap().get(&segment_id).map(|f| f.try_clone());
+    let file = self.file_cache.read().get(&segment_id).map(|f| f.try_clone());
 
     if let Some(Ok(file)) = file {
       return file;
     }
 
-    let path = self.data_folder.read().unwrap()
+    let path = self.data_folder.read()
                           .join(segment_id.to_string());
 
     let file = File::options()
@@ -63,7 +64,7 @@ impl DiskManager {
 
     let file_clone = file.try_clone();
     if let Ok(file_clone) = file_clone {
-      let mut file_cache = self.file_cache.write().unwrap();
+      let mut file_cache = self.file_cache.write();
       file_cache.insert(segment_id, file_clone);
       if file_cache.len() > 100 {
         // For now just evict a random element. Better than nothing.
@@ -78,7 +79,7 @@ impl DiskManager {
 
   #[cfg(not(unix))]
   fn open_file(&self, segment_id: RelationIdType, access: AccessType) -> File {
-    let path = self.data_folder.read().unwrap()
+    let path = self.data_folder.read()
                                 .join(segment_id.to_string());
 
     File::options()
@@ -93,7 +94,7 @@ impl DiskManager {
 impl StorageManager for DiskManager {
 
   fn create_relation(&self, segment_id: RelationIdType) {
-    File::create(self.data_folder.read().unwrap().join(segment_id.to_string())).unwrap();
+    File::create(self.data_folder.read().join(segment_id.to_string())).unwrap();
   }
 
   #[cfg(unix)]
@@ -138,7 +139,7 @@ impl StorageManager for DiskManager {
 
   fn get_relation_size(&self, segment_id: RelationIdType) -> u64 {
     //TODO: It would be better to return 0 if the file doesn't exist instead of creating it
-    let path = self.data_folder.read().unwrap().join(segment_id.to_string());
+    let path = self.data_folder.read().join(segment_id.to_string());
     if path.is_file(){
       metadata(path.clone()).unwrap().len()
     } else {

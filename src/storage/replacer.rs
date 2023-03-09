@@ -1,9 +1,10 @@
-use std::{option::Option, sync::{RwLock, Arc}};
+use std::{option::Option, sync::Arc};
 
 use super::{page::{PageId, Page}, buffer_manager::PageType};
 
 #[cfg(test)]
 use mockall::automock;
+use parking_lot::RwLock;
 
 #[cfg_attr(test, automock)]
 pub trait Replacer {
