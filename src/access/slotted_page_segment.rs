@@ -569,7 +569,7 @@ impl<A: Deref<Target = Page> + DerefMut<Target = Page>> SlottedPage<A> {
 mod test {
     use std::sync::Arc;
 
-    use crate::{storage::{buffer_manager::{mock::MockBufferManager, BufferManager}, page::{PAGE_SIZE, PageId, PageState}}, access::{slotted_page_segment::HEADER_SIZE}};
+    use crate::{storage::{disk::DiskManager, buffer_manager::{mock::MockBufferManager, BufferManager, HashTableBufferManager}, page::{PAGE_SIZE, PageId, PageState}, clock_replacer::ClockReplacer}, access::{slotted_page_segment::{HEADER_SIZE, self}}};
 
     use super::SlottedPageSegment;
 
@@ -888,4 +888,38 @@ mod test {
         assert!(bm.fix_page(PageId::new(1, tid.page_id + 1)).unwrap().try_write().unwrap().state.is_dirtyish());
         assert!(bm.fix_page(PageId::new(1, tid.page_id + 2)).unwrap().try_write().unwrap().state.is_dirtyish());
     }
+
+    #[test]
+    fn update_with_relocate_from_redirect_to_different_redirect_integration_test() {
+        let datadir = tempfile::tempdir().unwrap();
+        let datadir_path = datadir.into_path();
+        let disk_manager = DiskManager::new(datadir_path.clone());
+        let replacer = ClockReplacer::new();
+        let bm = Arc::new(HashTableBufferManager::new(disk_manager, replacer, PAGE_SIZE));
+        let testee = SlottedPageSegment::new(bm, 1, 0);
+        let data = vec![10u8; PAGE_SIZE - 2000];
+        testee.insert_record(&data).unwrap();
+        let data = vec![0u8; 500];
+        let tid = testee.insert_record(&data).unwrap();
+        let data = vec![50u8; 5000];
+        testee.write_record(tid, &data).unwrap();
+        let data = vec![100u8; 5000];
+        testee.insert_record(&data).unwrap();
+        let data = vec![40u8; PAGE_SIZE - 2000];
+        testee.write_record(tid, &data).unwrap();
+        drop(testee);
+
+        let disk_manager = DiskManager::new(datadir_path);
+        let replacer = ClockReplacer::new();
+        let bm = Arc::new(HashTableBufferManager::new(disk_manager, replacer, PAGE_SIZE));
+        let testee = SlottedPageSegment::new(bm, 1, 0);
+
+        let record = testee.get_record(tid, |record| {Vec::from(record)}).unwrap();
+        assert_eq!(record.len(), PAGE_SIZE - 2000);
+        assert_eq!(record[0], 40);
+        assert_eq!(record[2000], 40);
+        assert_eq!(record[7999], 40);
+    }
+
+    // TODO: Integration tests with actual disk writes
 }

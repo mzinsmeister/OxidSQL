@@ -15,7 +15,7 @@ pub trait StorageManager: Sync + Send {
   fn get_relation_size(&self, segment_id: RelationIdType) -> u64;
 }
 
-pub(super) struct DiskManager {
+pub(crate) struct DiskManager {
   data_folder: Arc<RwLock<PathBuf>>,
   #[cfg(unix)]
   file_cache: Arc<RwLock<HashMap<SegmentId, File>>>

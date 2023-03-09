@@ -13,7 +13,7 @@ struct ClockPageInfo {
   page: PageType
 }
 
-pub(super) struct ClockReplacer {
+pub(crate) struct ClockReplacer {
   // Would probably be more elegant to have a replacer specific struct included with every BufferFrame
   // But this is fine for now. At least guarantees O(1) lookup time for a specific Page and 
   // the Buffer Pool Manager is the only component touching the Replacer API
