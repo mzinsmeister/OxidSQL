@@ -13,7 +13,10 @@ pub(super) struct QueryEdge {
 }
 
 /// The Query Graph is a helper data structure for all kinds of optimizers. 
-/// This one internally uses Petgraph for now
+/// This one internally uses Petgraph for now. Not sure the petgraph graph representation
+/// we are currently using (normal petgraph::Graph) is actually the ideal one. MatrixGraph
+/// might be better for our use case. But we can change that later since the QueryGraph doesn't
+/// expose any petgraph types.
 pub(super) struct QueryGraph {
     graph: petgraph::Graph<QueryNode, QueryEdge>,
     relation_node_map: HashMap<usize, petgraph::graph::NodeIndex>,

@@ -2,6 +2,7 @@ use std::io::{Cursor};
 use std::error::Error;
 use std::convert::TryInto;
 use std::fmt::{Display, Formatter};
+use std::ops::{Deref, DerefMut};
 use byteorder::{BigEndian, WriteBytesExt, ReadBytesExt};
 
 use crate::util::align::AlignedSlice;
@@ -69,7 +70,8 @@ pub enum PageState {
 }
 
 impl PageState {
-    pub fn get_dirty_repr(&self) -> PageState {
+    #[inline]
+    fn get_dirty_repr(&self) -> PageState {
         match self {
             PageState::NEW => PageState::NEW,
             PageState::DIRTY => PageState::DIRTY,
@@ -77,6 +79,7 @@ impl PageState {
         }
     }
 
+    #[inline]
     pub fn is_dirtyish(&self) -> bool {
         match self {
             PageState::NEW => true,
@@ -87,7 +90,7 @@ impl PageState {
 }
 
 pub struct Page{
-    pub data: AlignedSlice,
+    pub(super) data: AlignedSlice,
     pub state: PageState,
     pub id: PageId,
 }
@@ -101,14 +104,17 @@ impl Page {
         }
     }
 
+    #[inline(always)]
     pub fn get_u16(&self, pos: usize) -> u16 {
         u16::from_be_bytes(self.data[pos..pos+2].try_into().unwrap())
     }
 
+    #[inline(always)]
     pub fn get_u32(&self, pos: usize) -> u32 {
         u32::from_be_bytes(self.data[pos..pos+4].try_into().unwrap())
     }
 
+    #[inline(always)]
     pub fn get_u16_tuple(&self, pos: usize) -> (u16, u16) {
         let mut cursor = Cursor::new(&*self.data);
         cursor.set_position(pos as u64);
@@ -117,6 +123,7 @@ impl Page {
         return (v1, v2);
     }
 
+    #[inline(always)]
     pub fn set_u16(&mut self, pos: usize, val: u16) {
         let mut bytes = Vec::with_capacity(2);
         bytes.write_u16::<BigEndian>(val).unwrap();
@@ -124,13 +131,33 @@ impl Page {
         self.state = self.state.get_dirty_repr();
     }
 
+    #[inline(always)]
     pub fn set_u32(&mut self, pos: usize, val: u32) {
         let bytes = val.to_be_bytes();
         self.data[pos..pos+4].copy_from_slice(&bytes);
         self.state = self.state.get_dirty_repr();
     }
 
-    pub fn make_dirty(&mut self) {
+    #[inline]
+    fn make_dirty(&mut self) {
         self.state = self.state.get_dirty_repr();
+    }
+}
+
+impl Deref for Page {
+    type Target = [u8];
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+
+impl DerefMut for Page {
+
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.make_dirty();
+        &mut self.data
     }
 }

@@ -47,7 +47,7 @@ impl<B: BufferManager> FreeSpaceSegment<B> {
     fn write_cache_for_size_class(page: &mut Page, size_class: u8, page_nr: u64) {
         // Every page has at most size_class 15
         if size_class < 15 {
-            page.data[size_class as usize * 8..(size_class as usize + 1) * 8]
+            page[size_class as usize * 8..(size_class as usize + 1) * 8]
             .copy_from_slice(&page_nr.to_le_bytes());
         }
     }
@@ -56,16 +56,16 @@ impl<B: BufferManager> FreeSpaceSegment<B> {
         if size_class >= 15 {
             return 0;
         }
-        u64::from_le_bytes(page.data[size_class as usize * 8..(size_class as usize + 1) * 8].try_into().unwrap())
+        u64::from_le_bytes(page[size_class as usize * 8..(size_class as usize + 1) * 8].try_into().unwrap())
     }
 
     fn write_nibble(page: &mut Page, nibble_id: u64, value: u8) {
         let byte_id = nibble_id / 2;
         let nibble_offset = nibble_id % 2;
         if nibble_offset == 0 {
-            page.data[byte_id as usize] = (page.data[byte_id as usize] & 0xF0) | value;
+            page[byte_id as usize] = (page[byte_id as usize] & 0xF0) | value;
         } else {
-            page.data[byte_id as usize] = (page.data[byte_id as usize] & 0x0F) | (value << 4);
+            page[byte_id as usize] = (page[byte_id as usize] & 0x0F) | (value << 4);
         }
     }
 
@@ -73,9 +73,9 @@ impl<B: BufferManager> FreeSpaceSegment<B> {
         let byte_id = nibble_id / 2;
         let nibble_offset = nibble_id % 2;
         if nibble_offset == 0 {
-            page.data[byte_id as usize] & 0x0F
+            page[byte_id as usize] & 0x0F
         } else {
-            (page.data[byte_id as usize] & 0xF0) >> 4
+            (page[byte_id as usize] & 0xF0) >> 4
         }
     }
 
@@ -95,9 +95,8 @@ impl<B: BufferManager> FreeSpaceSegment<B> {
         let page = self.bm.fix_page(PageId::new(self.segment_id, 0))?; 
         let mut page_write = page.write();
         let previous_size = Self::read_nibble(&page_write, nibble_id);
-        Self::write_nibble(&mut page_write, nibble_id, size_nibble);
         if previous_size != size_nibble {
-            page_write.make_dirty();
+            Self::write_nibble(&mut page_write, nibble_id, size_nibble);
         }
         drop(page_write); // Fsi segment isn't guaranteed to actually give you up to date information anyway so we can unlock here
         drop(page);
@@ -122,7 +121,6 @@ impl<B: BufferManager> FreeSpaceSegment<B> {
                         for current_size in (size.max(previous_size)..upper_bound).rev() {
                             upper_bound = current_size;
                             Self::write_cache_for_size_class(&mut cache_page_write, current_size, nibble as u64 - 15 * 16);
-                            cache_page_write.make_dirty();
                         }
                         if upper_bound <= previous_size {
                             break;
@@ -139,7 +137,6 @@ impl<B: BufferManager> FreeSpaceSegment<B> {
                         for current_size in (size.max(previous_size)..upper_bound).rev() {
                             upper_bound = current_size;
                             Self::write_cache_for_size_class(&mut cache_page_write, current_size, page_id * PAGE_SIZE as u64 * 2 + nibble as u64 - 15 * 16);
-                            cache_page_write.make_dirty();
                         }
                         if upper_bound <= previous_size {
                             break;
@@ -152,7 +149,6 @@ impl<B: BufferManager> FreeSpaceSegment<B> {
                 let cached_page = Self::read_cache_for_size_class(&cache_page_write, i);
                 if cached_page > page_nr {
                     Self::write_cache_for_size_class(&mut cache_page_write, i, page_nr);
-                    cache_page_write.make_dirty();
                 } else {
                     break;
                 }

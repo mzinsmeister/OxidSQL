@@ -169,7 +169,6 @@ impl<B: BufferManager> SlottedPageSegment<B> {
                     let new_tid = RelationTID{ page_id: page_id, slot_id: slot_id };
                     operation(&mut slotted_page, new_tid, offset, length)?;
                     self.free_space_segment.update_page_size(page_id, slotted_page.get_free_space())?;
-                    slotted_page.page.make_dirty();
                     drop(slotted_page);
                     return Ok(new_tid);
                 } else {
@@ -202,12 +201,10 @@ impl<B: BufferManager> SlottedPageSegment<B> {
             let root_relocate_result = slotted_root_page.relocate(tid.slot_id, size);
             if root_relocate_result {
                 if let Slot::Slot { offset, length } = slotted_root_page.get_slot(tid.slot_id) {
-                    slotted_root_page.page.make_dirty();
                     operation(slotted_root_page.get_record_mut(offset, length));
                     self.free_space_segment.update_page_size(tid.page_id, slotted_root_page.get_free_space())?;
                     drop(slotted_root_page);
                     slotted_redirect_target_page.erase(redirect_tid.slot_id);
-                    slotted_redirect_target_page.page.make_dirty();
                     self.free_space_segment.update_page_size(redirect_tid.page_id, slotted_redirect_target_page.get_free_space())?;
                     return Ok(());
                 } else {
@@ -216,7 +213,6 @@ impl<B: BufferManager> SlottedPageSegment<B> {
             }
             let orig_relocate_result = slotted_redirect_target_page.relocate(redirect_tid.slot_id, size + 8);
             if orig_relocate_result {
-                slotted_redirect_target_page.page.make_dirty();
                 if let Slot::RedirectTarget { offset, length } = slotted_redirect_target_page.get_slot(redirect_tid.slot_id) {
                     drop(slotted_root_page);
                     operation(slotted_redirect_target_page.get_record_mut(offset + 8, length - 8));
@@ -227,7 +223,6 @@ impl<B: BufferManager> SlottedPageSegment<B> {
                 }
             }
             self.allocate_and_do(size + 8, |slotted_alloc_page: &mut SlottedPage<&mut Page>, new_tid: RelationTID, new_offset, new_length| -> Result<(), BufferManagerError> {
-                slotted_root_page.page.make_dirty();
                 slotted_root_page.write_slot(tid.slot_id, &Slot::Redirect { tid: RelationTID { page_id: new_tid.page_id, slot_id: new_tid.slot_id } });
                 slotted_alloc_page.write_slot(new_tid.slot_id, &Slot::RedirectTarget{ offset: new_offset, length: new_length });
                 slotted_alloc_page.get_record_mut(offset, 8).copy_from_slice(u64::from(&tid).to_be_bytes().as_ref());
@@ -236,7 +231,6 @@ impl<B: BufferManager> SlottedPageSegment<B> {
                     slotted_alloc_page.get_record_mut(offset + 8, copy_size)
                             .copy_from_slice(slotted_redirect_target_page.get_record(offset, copy_size));
                 }
-                slotted_redirect_target_page.page.make_dirty();
                 slotted_redirect_target_page.erase(redirect_tid.slot_id);
                 self.free_space_segment.update_page_size(redirect_tid.page_id, slotted_redirect_target_page.get_free_space())?;
                 self.free_space_segment.update_page_size(new_tid.page_id, slotted_alloc_page.get_free_space())?;
@@ -260,11 +254,11 @@ impl<B: BufferManager> SlottedPageSegment<B> {
         //             (will never be root or orig because we try to relocate there first)
         let root_page_id = tid.page_id;
         let root_page = self.bm.fix_page(PageId::new(self.segment_id, root_page_id))?;
+        {
         let mut slotted_root_page = SlottedPage::new(root_page.write());
         let root_slot = slotted_root_page.get_slot(tid.slot_id);
         match root_slot {
             Slot::Slot { offset: _, length: _ } => {
-                slotted_root_page.page.make_dirty();
                 let relocate_result = slotted_root_page.relocate(tid.slot_id, size);
                 if relocate_result {
                     if let Slot::Slot { offset, length } = slotted_root_page.get_slot(tid.slot_id) {
@@ -297,6 +291,7 @@ impl<B: BufferManager> SlottedPageSegment<B> {
             Slot::Free => panic!("tried to resize a free slot"),
         }
     }
+    }
 
     pub fn write_record(&self, tid: RelationTID, data: &[u8]) -> Result<(), BufferManagerError> {
         self.resize_and_do(tid, data.len(), false, |record| record.copy_from_slice(data))
@@ -313,15 +308,15 @@ struct SlottedPage<A: Deref<Target = Page>> {
 
 fn get_slot_from_page(page: &Page, slot_id: u16) -> Slot {
     let slot_offset = HEADER_SIZE + slot_id as usize * 8;
-    (&page.data[slot_offset..slot_offset + 8]).into()
+    (&page[slot_offset..slot_offset + 8]).into()
 }
 
 fn get_data_from_page(page: &Page, data_start: usize) -> &[u8] {
-    &page.data[data_start as usize..]
+    &page[data_start as usize..]
 }
 
 fn get_record_from_page(page: &Page, offset: u32, length: u32) -> &[u8] {
-    &page.data[offset as usize .. offset as usize + length as usize]
+    &page[offset as usize .. offset as usize + length as usize]
 }
 
 impl<A: Deref<Target = Page>> SlottedPage<A> {
@@ -359,7 +354,7 @@ impl<A: Deref<Target = Page>> SlottedPage<A> {
     }
 
     fn get_data_length(&self) -> u32 {
-        self.page.data.len() as u32 - self.get_data_start()
+        self.page.len() as u32 - self.get_data_start()
     }
 
     fn get_record(&self, offset: u32, length: u32) -> &[u8] {
@@ -378,29 +373,32 @@ impl<A: Deref<Target = Page> + DerefMut<Target = Page>> SlottedPage<A> {
     fn write_slot(&mut self, slot_id: u16, slot: &Slot) {
         let slot_offset = HEADER_SIZE + slot_id as usize * 8;
         let slot_binary: [u8; 8] = slot.into();
-        self.page.data[slot_offset..slot_offset + 8].copy_from_slice(slot_binary.as_ref());
-        let read_binary = &self.page.data[slot_offset..slot_offset + 8];
-        assert_eq!(read_binary, slot_binary);
+        self.page[slot_offset..slot_offset + 8].copy_from_slice(slot_binary.as_ref());
+        #[cfg(debug_assertions)]
+        {
+            let read_binary = &self.page[slot_offset..slot_offset + 8];
+            assert_eq!(&Slot::from(read_binary), slot);
+        }
     }
 
     fn set_slot_count(&mut self, slot_count: u16) {
-        self.page.data[0..2].copy_from_slice(&slot_count.to_be_bytes());
+        self.page[0..2].copy_from_slice(&slot_count.to_be_bytes());
     }
 
     fn set_first_free_slot(&mut self, first_free_slot: u16) {
-        self.page.data[2..4].copy_from_slice(&first_free_slot.to_be_bytes());
+        self.page[2..4].copy_from_slice(&first_free_slot.to_be_bytes());
     }
 
     fn set_free_space(&mut self, free_space: u32) {
-        self.page.data[8..12].copy_from_slice(&free_space.to_be_bytes());
+        self.page[8..12].copy_from_slice(&free_space.to_be_bytes());
     }
 
     fn set_data_start(&mut self, data_start: u32) {
-        self.page.data[4..8].copy_from_slice(&data_start.to_be_bytes());
+        self.page[4..8].copy_from_slice(&data_start.to_be_bytes());
     }
 
     fn get_record_mut(&mut self, offset: u32, length: u32) -> &mut [u8] {
-        &mut self.page.data[offset as usize .. offset as usize + length as usize]
+        &mut self.page[offset as usize .. offset as usize + length as usize]
     }
 
     fn allocate(&mut self, size: usize) -> Option<u16> {
@@ -554,10 +552,10 @@ impl<A: Deref<Target = Page> + DerefMut<Target = Page>> SlottedPage<A> {
                 offset_slot_map.insert(offset as usize, OffsetLengthSlot { slot_id, offset, length });
             }
         }
-        let mut new_data_start = self.page.data.len() as u32;
+        let mut new_data_start = self.page.len() as u32;
         for (offset, slot) in offset_slot_map.iter() {
             new_data_start = new_data_start - slot.length;
-            self.page.data.copy_within(*offset..*offset + slot.length as usize, new_data_start as usize);
+            self.page.copy_within(*offset..*offset + slot.length as usize, new_data_start as usize);
             let new_slot = Slot::new(new_data_start, slot.length);
             self.write_slot(slot.slot_id, &new_slot);
         }

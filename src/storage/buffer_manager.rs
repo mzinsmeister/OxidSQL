@@ -6,6 +6,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
 use std::fmt::Display;
 use std::hash::{Hash, Hasher};
+use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -13,8 +14,43 @@ use super::disk::StorageManager;
 use super::page::{PageId, PAGE_SIZE};
 use super::replacer::Replacer;
 
+pub struct BMArc<'a, B: BufferManager> {
+    page: Arc<RwLock<Page>>,
+    page_id: PageId,
+    buffer_manager: &'a B,
+    unfix: Box<dyn Fn(&'a B, PageId, &PageType)>
+}
+
+impl<'a, B: BufferManager> BMArc<'a, B> {
+    pub fn new(page: Arc<RwLock<Page>>, page_id: PageId, buffer_manager: &'a B, unfix: Box<dyn Fn(&'a B, PageId, &PageType)>) -> BMArc<'a, B> {
+        BMArc {
+            page,
+            page_id,
+            buffer_manager,
+            unfix
+        }
+    }
+}
+
+impl<'a, B: BufferManager> Deref for BMArc<'a, B> {
+    type Target = RwLock<Page>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.page
+    }
+}
+
+impl<'a, B: BufferManager> Drop for BMArc<'a, B> {
+    fn drop(&mut self) {
+        (self.unfix)(self.buffer_manager, self.page_id, &self.page);
+    }
+}
+
 // TODO: Abstract this away so that e.g. optimistic latches could be used.
-//       Most likely to something that takes an idempotent lambda would be best.
+//       Most likely to something that takes an idempotent lambda would be best but
+//       likely not be enough to implement sth like the complex slotted page resize logic.
+//       Maybe something like a finalizer method that needs to be called before drop of a
+//       guard would be best (otherwise it would panic on drop)
 pub type PageType = Arc<RwLock<Page>>;
 // Self built (kinda) chaining hash table but with a Vec because Rusts LinkedList is useless
 pub(super) type PageTableType = Vec<Mutex<PageTableBucket>>; 
@@ -91,8 +127,8 @@ impl PageTableBucket {
           based buffer manager.
  */
 
-pub trait BufferManager: Sync + Send {
-    fn fix_page(&self, page_id: PageId) -> Result<PageType, BufferManagerError>;
+pub trait BufferManager: Sync + Send + Sized {
+    fn fix_page<'a>(&'a self, page_id: PageId) -> Result<BMArc<'a, Self>, BufferManagerError>;
     fn flush(&self) -> Result<(), BufferManagerError>;
 }
 
@@ -107,8 +143,7 @@ pub struct HashTableBufferManager<R: Replacer + Send, S: StorageManager> {
 #[derive(Debug)]
 pub enum BufferManagerError {
     NoBufferFrameAvailable,
-    DiskError(std::io::Error),
-    PageNotFound
+    DiskError(std::io::Error)
 }
 
 impl From<std::io::Error> for BufferManagerError {
@@ -192,7 +227,7 @@ impl<R: Replacer + Send, S: StorageManager> HashTableBufferManager<R, S> {
                     let victim_page_write_result = victim_page.try_write();
                     if victim_page_write_result.is_some() {
                         let mut victim_page_write = victim_page_write_result.unwrap();
-                        if victim_page_write.state == PageState::DIRTY {
+                        if victim_page_write.state.is_dirtyish() {
                             drop(victim_bucket);                      
                             self.disk_manager.write_page(victim_page_write.id, &victim_page_write.data)?;
                             victim_page_write.state = PageState::CLEAN;
@@ -244,21 +279,21 @@ impl<R: Replacer + Send, S: StorageManager> HashTableBufferManager<R, S> {
 }
 
 impl<R: Replacer + Send, S: StorageManager> BufferManager for HashTableBufferManager<R,S> {
-    fn fix_page(&self, page_id: PageId) -> Result<PageType, BufferManagerError> {
+    fn fix_page<'a>(&'a self, page_id: PageId) -> Result<BMArc<'a, Self>, BufferManagerError> {
         let page_bucket = self.pagetable[self.get_pagetable_index(page_id)].lock();
         let page = if let Some(result) = page_bucket.get(page_id) {
             drop(page_bucket);
-            let mut replacer = self.replacer.lock();
-            if replacer.has_page(page_id) {
-                replacer.use_page(page_id);
-            }
             result.clone()
         } else {
             self.load(page_id, page_bucket)?
         };
-        // TODO: HACK(kinda): To avoid key not found panics for new pages that are currently beeing loaded
-        //       we currently only set the used flag if the page is actually there
-        Ok(page)
+        Ok(BMArc::new(page, page_id, &self, Box::new(
+            #[inline(always)]
+            |bm, page_id, _| {
+                // unfix
+                let mut replacer = bm.replacer.lock();
+                replacer.use_page(page_id);
+        })))
     }
 
     fn flush(&self) -> Result<(), BufferManagerError> {
@@ -266,7 +301,7 @@ impl<R: Replacer + Send, S: StorageManager> BufferManager for HashTableBufferMan
             for (_, page) in bucket.lock().bucket.iter() {
                 let mut page = page.write();
                 if page.state.is_dirtyish() {
-                    self.disk_manager.write_page(page.id, &page.data)?;
+                    self.disk_manager.write_page(page.id, &page)?;
                     page.state = PageState::CLEAN;
                 }
             }
@@ -289,9 +324,9 @@ pub mod mock {
 
     use parking_lot::Mutex;
 
-    use crate::{storage::page::{PageId, Page}, util::align::{AlignedSlice, alligned_slice}};
+    use crate::{storage::page::{PageId}, util::align::alligned_slice};
 
-    use super::{PageType, BufferManager, new_page};
+    use super::{PageType, BufferManager, new_page, BMArc};
 
     pub struct MockBufferManager {
         page_size: usize,
@@ -308,13 +343,13 @@ pub mod mock {
     }
 
     impl BufferManager for MockBufferManager {
-        fn fix_page(&self, page_id: PageId) -> Result<PageType, super::BufferManagerError> {
+        fn fix_page<'a>(&'a self, page_id: PageId) -> Result<BMArc<'a, Self>, super::BufferManagerError> {
             let mut segments = self.segments.lock();
             let page = segments
                 .get(&page_id.segment_id)
                 .and_then(|segment| segment.get(&page_id.offset_id));
-            if let Some(page) = page {
-                Ok(page.clone())
+            let page = if let Some(page) = page {
+                page.clone()
             } else {
                 if !segments.contains_key(&page_id.segment_id) {
                     segments.insert(page_id.segment_id, HashMap::new());
@@ -324,8 +359,9 @@ pub mod mock {
                 new_page_guard.data = alligned_slice(self.page_size, 1);
                 drop(new_page_guard);
                 segments.get_mut(&page_id.segment_id).unwrap().insert(page_id.offset_id, new_page);
-                Ok(segments[&page_id.segment_id][&page_id.offset_id].clone())
-            }
+                segments[&page_id.segment_id][&page_id.offset_id].clone()
+            };
+            Ok(BMArc::new(page, page_id, &self, Box::new(|_, _, _| {})))
         }
 
         fn flush(&self) -> Result<(), super::BufferManagerError> {
@@ -362,24 +398,14 @@ mod tests {
         let page = bpm.fix_page(PageId::new(1,1)).unwrap();
         let page = page.try_read().unwrap();
         assert_eq!(page.state, PageState::NEW);
-        assert_eq!(page.data.len(), PAGE_SIZE);
+        assert_eq!(page.len(), PAGE_SIZE);
     }
 
     #[test]
     fn flush_test() {
         let datadir = tempfile::tempdir().unwrap();
         let datadir_path = PathBuf::from(datadir.path());
-     /*
-    TODO: Implement a parser for the SQL dialect supported by the database (likely using the nom
-          parser combinator library). The parser should produce an abstract syntax tree (AST) that 
-          can be analyzed by the analyzer which for now will also live in this module. The SQL
-          dialect should for now be compatible with postgres.
-
-          Options are:
-            - Use the parser written for my hacky v1 database (also with Nom)
-            - Use a library exposing the actual postgres parser in Rust
-            - Write a parser from scratch
- */   let disk_manager = DiskManager::new(datadir_path.clone());
+        let disk_manager = DiskManager::new(datadir_path.clone());
         let bpm = HashTableBufferManager::new(disk_manager, ClockReplacer::new(), 10);
         let page = bpm.fix_page(PageId::new(1,0)).unwrap();
         let mut page_write = page.try_write().unwrap();
@@ -471,8 +497,8 @@ mod tests {
                         page_counter.fetch_add(1, Ordering::Relaxed);
                         drop(pages_write);
                         let id_slice = next_offset_id.to_be_bytes();
-                        page_write.data[0..8].copy_from_slice(&id_slice);
-                        page_write.data[8..16].copy_from_slice(&r.to_be_bytes());
+                        page_write[0..8].copy_from_slice(&id_slice);
+                        page_write[8..16].copy_from_slice(&r.to_be_bytes());
                         page_write.state = PageState::DIRTY;
                     }
                     if j % 3 == 0 {
@@ -483,8 +509,8 @@ mod tests {
                         let page = bpm.fix_page(page_id).unwrap();
                         let mut page_write = page.write();
                         let id_slice = page_id.offset_id.to_be_bytes();
-                        page_write.data[0..8].copy_from_slice(&id_slice);
-                        page_write.data[8..16].copy_from_slice(&r.to_be_bytes());
+                        page_write[0..8].copy_from_slice(&id_slice);
+                        page_write[8..16].copy_from_slice(&r.to_be_bytes());
                         page_write.state = PageState::DIRTY;
                     } else {
                         // Read
@@ -493,7 +519,7 @@ mod tests {
                         drop(pages_read);
                         let page = bpm.fix_page(page_id).unwrap();
                         let page_read = page.read();
-                        let read_id = u64::from_be_bytes(page_read.data[0..8].try_into().unwrap());
+                        let read_id = u64::from_be_bytes(page_read[0..8].try_into().unwrap());
                         assert_eq!(read_id, page_id.offset_id);
                     }
                 }
@@ -506,12 +532,11 @@ mod tests {
             let page_id = PageId::new(1, offset_id);
             let page = bpm.fix_page(page_id).unwrap();
             let page_read = page.read();
-            assert_eq!(u64::from_be_bytes(page_read.data[0..8].try_into().unwrap()), page_id.offset_id);
+            assert_eq!(u64::from_be_bytes(page_read[0..8].try_into().unwrap()), page_id.offset_id);
         }
     }
 
-    fn fill_page(page_id: PageId, page_write: &mut Page) {
-        let page_data = &mut page_write.data;
+    fn fill_page(page_id: PageId, page_data: &mut Page) {
         page_data[0] = page_id.segment_id.to_be_bytes()[0];
         page_data[1] = page_id.segment_id.to_be_bytes()[1];
         page_data[2] = page_id.offset_id.to_be_bytes()[0];
@@ -525,22 +550,21 @@ mod tests {
         page_data[100] = 123;
         page_data[1000] = 234;
         page_data[PAGE_SIZE - 1] = 21;
-        page_write.state = PageState::DIRTY;
     }
 
     fn assert_page(page_id: PageId, page: &Page) {
-        assert_eq!(page.data[0], page_id.segment_id.to_be_bytes()[0]);
-        assert_eq!(page.data[1], page_id.segment_id.to_be_bytes()[1]);
-        assert_eq!(page.data[2], page_id.offset_id.to_be_bytes()[0]);
-        assert_eq!(page.data[3], page_id.offset_id.to_be_bytes()[1]);
-        assert_eq!(page.data[4], page_id.offset_id.to_be_bytes()[2]);
-        assert_eq!(page.data[5], page_id.offset_id.to_be_bytes()[3]);
-        assert_eq!(page.data[6], page_id.offset_id.to_be_bytes()[4]);
-        assert_eq!(page.data[7], page_id.offset_id.to_be_bytes()[5]);
-        assert_eq!(page.data[8], page_id.offset_id.to_be_bytes()[6]);
-        assert_eq!(page.data[9], page_id.offset_id.to_be_bytes()[7]);
-        assert_eq!(page.data[100], 123);
-        assert_eq!(page.data[1000], 234);
-        assert_eq!(page.data[PAGE_SIZE - 1], 21);
+        assert_eq!(page[0], page_id.segment_id.to_be_bytes()[0]);
+        assert_eq!(page[1], page_id.segment_id.to_be_bytes()[1]);
+        assert_eq!(page[2], page_id.offset_id.to_be_bytes()[0]);
+        assert_eq!(page[3], page_id.offset_id.to_be_bytes()[1]);
+        assert_eq!(page[4], page_id.offset_id.to_be_bytes()[2]);
+        assert_eq!(page[5], page_id.offset_id.to_be_bytes()[3]);
+        assert_eq!(page[6], page_id.offset_id.to_be_bytes()[4]);
+        assert_eq!(page[7], page_id.offset_id.to_be_bytes()[5]);
+        assert_eq!(page[8], page_id.offset_id.to_be_bytes()[6]);
+        assert_eq!(page[9], page_id.offset_id.to_be_bytes()[7]);
+        assert_eq!(page[100], 123);
+        assert_eq!(page[1000], 234);
+        assert_eq!(page[PAGE_SIZE - 1], 21);
     }
 }

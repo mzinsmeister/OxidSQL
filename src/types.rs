@@ -19,3 +19,11 @@ impl From<&RelationTID> for u64 {
         (input.page_id << 16) | (input.slot_id as u64)
     }
 }
+
+pub enum TupleValue {
+    Int(i64), // Only ints for now
+    // Float(f64),
+    // String(String),
+    // Bool(bool),
+    // Null,
+}

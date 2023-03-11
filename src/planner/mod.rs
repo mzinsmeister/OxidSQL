@@ -3,3 +3,5 @@
           by applying rewrite rules and possibly using optimization techniques implemented in
           the optimizer module.
  */
+
+pub mod plan;
