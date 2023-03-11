@@ -508,7 +508,7 @@ mod tests {
                         page_write[8..16].copy_from_slice(&r.to_be_bytes());
                         page_write.state = PageState::DIRTY;
                     }
-                    if j % 3 == 0 {
+                    if r % 4 == 0 {
                         // Write
                         let pages_read = pages.read();
                         let page_id = pages_read.get(r as usize % pages_read.len()).unwrap().clone();
