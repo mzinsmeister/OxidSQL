@@ -464,19 +464,26 @@ mod tests {
         assert_page(PageId::new(1, 1), &page1_read);
     }
 
-
+    #[test]
+    fn multithreaded_io_contention_test() {
+        multithreaded_contention_test(20, 150, 100)
+    }
 
     #[test]
-    fn multithreaded_contention_test() {
+    fn multithreaded_lock_contention_test() {
+        multithreaded_contention_test(20, 400, 8000)
+    }
+
+    fn multithreaded_contention_test(num_threads: u64, num_ops: usize, bm_size: usize) {
         let datadir = tempfile::tempdir().unwrap();
         let disk_manager = DiskManager::new(datadir.into_path());
         disk_manager.create_relation(1);
-        let bpm = Arc::new(HashTableBufferManager::new(disk_manager, ClockReplacer::new(), 200));
+        let bpm = Arc::new(HashTableBufferManager::new(disk_manager, ClockReplacer::new(), bm_size));
         let next_offset_id = Arc::new(AtomicU32::new(0));
         let page_counter = Arc::new(AtomicU32::new(0));
         let pages: Arc<RwLock<Vec<PageId>>> = Arc::new(RwLock::new(Vec::new()));
         let mut jhs: Vec<JoinHandle<()>> = Vec::new();
-        for i in 0..20 {
+        for i in 0..num_threads {
             let bpm = bpm.clone();
             let pages = pages.clone();
             let page_counter = page_counter.clone();
@@ -484,7 +491,7 @@ mod tests {
             let page_counter = page_counter.clone();
             jhs.push(thread::spawn(move || {
                 let mut rng: rand::rngs::StdRng = rand::SeedableRng::seed_from_u64(42 * i);
-                for j in 0..200 {
+                for j in 0..num_ops {
                     let r: u64 = rng.gen();
                     if page_counter.load(Ordering::Relaxed) < 5 || r % 10 == 0 {
                         // create new
