@@ -466,15 +466,15 @@ mod tests {
 
     #[test]
     fn multithreaded_io_contention_test() {
-        multithreaded_contention_test(20, 150, 100)
+        multithreaded_contention_test(20, 150, 100, 10)
     }
 
     #[test]
     fn multithreaded_lock_contention_test() {
-        multithreaded_contention_test(20, 400, 8000)
+        multithreaded_contention_test(20, 700, 1000, 30)
     }
 
-    fn multithreaded_contention_test(num_threads: u64, num_ops: usize, bm_size: usize) {
+    fn multithreaded_contention_test(num_threads: u64, num_ops: usize, bm_size: usize, every_nth_new: u64) {
         let datadir = tempfile::tempdir().unwrap();
         let disk_manager = DiskManager::new(datadir.into_path());
         disk_manager.create_relation(1);
@@ -493,7 +493,7 @@ mod tests {
                 let mut rng: rand::rngs::StdRng = rand::SeedableRng::seed_from_u64(42 * i);
                 for j in 0..num_ops {
                     let r: u64 = rng.gen();
-                    if page_counter.load(Ordering::Relaxed) < 5 || r % 10 == 0 {
+                    if page_counter.load(Ordering::Relaxed) < 5 || r % every_nth_new == 0 {
                         // create new
                         let next_offset_id = next_offset_id.fetch_add(1, Ordering::Relaxed) as u64;
                         let page_id = PageId::new(1, next_offset_id);
