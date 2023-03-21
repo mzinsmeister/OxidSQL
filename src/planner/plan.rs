@@ -56,8 +56,8 @@ pub enum BinaryOperator {
     Mul,
     Div,
     Eq,
-    Neq,
-    /*Lt,
+    /*Neq,
+    Lt,
     Lte,
     Gt,
     Gte,*/
@@ -67,4 +67,24 @@ pub enum BinaryOperator {
 
 pub enum UnaryOperator {
     Not,
+}
+
+pub struct PhysicalPlan {
+    pub root_operator: PhysicalPlanOperator,
+    pub cost: f64
+}
+
+pub enum PlannerError {}
+
+pub trait Planner {
+    fn plan(&self, query: &Query) -> Result<PhysicalPlan, PlannerError>;
+}
+
+// Default Planner using the DPccp algorithm for optimization
+pub type DefaultPlanner = DPccpPlanner;
+
+pub struct DPccpPlanner {}
+
+impl Planner for DPccpPlanner {
+
 }

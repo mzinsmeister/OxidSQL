@@ -287,6 +287,7 @@ impl<B: BufferManager> SlottedPageSegment<B> {
                 Ok(())
             },
             Slot::Redirect { tid: redirect_tid } => self.resize_and_do_redirect(tid, redirect_tid, &mut slotted_root_page, size, copy_previous, operation),
+            // TODO: Implement this one. We will probably want this for updates while sequentially scanning
             Slot::RedirectTarget { offset: _, length: _ } => panic!("tried to resize a redirect target"),
             Slot::Free => panic!("tried to resize a free slot"),
         }
