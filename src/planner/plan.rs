@@ -86,5 +86,7 @@ pub type DefaultPlanner = DPccpPlanner;
 pub struct DPccpPlanner {}
 
 impl Planner for DPccpPlanner {
-
+    fn plan(&self, query: &Query) -> Result<PhysicalPlan, PlannerError> {
+        
+    }
 }

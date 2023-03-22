@@ -3,6 +3,7 @@ mod util;
 mod storage;
 mod access;
 mod optimizer;
+mod planner;
 
 use std::{fs::create_dir_all, path::Path};
 
