@@ -3,6 +3,7 @@ use crate::{storage::buffer_manager::BufferManagerError, types::RelationTID};
 mod free_space_inventory;
 mod btree_segment;
 mod slotted_page_segment;
+pub mod tuple;
 
 pub use self::btree_segment::*;
 pub use self::slotted_page_segment::*;

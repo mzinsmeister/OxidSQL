@@ -1,3 +1,5 @@
+use crate::types::TupleValue;
+
 
 
 type TableRef = usize; // Placeholder
@@ -76,6 +78,7 @@ pub struct PhysicalPlan {
 
 pub enum PlannerError {}
 
+/*
 pub trait Planner {
     fn plan(&self, query: &Query) -> Result<PhysicalPlan, PlannerError>;
 }
@@ -87,6 +90,6 @@ pub struct DPccpPlanner {}
 
 impl Planner for DPccpPlanner {
     fn plan(&self, query: &Query) -> Result<PhysicalPlan, PlannerError> {
-        
+        unimplemented!()
     }
-}
+}*/

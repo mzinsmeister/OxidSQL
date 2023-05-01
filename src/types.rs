@@ -1,4 +1,3 @@
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RelationTID {
     pub page_id: u64, // only current segment (48 bits max)
@@ -20,10 +19,32 @@ impl From<&RelationTID> for u64 {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TupleValueType {
+    BigInt,
+    String,
+    Int,
+    SmallInt
+}
+
+impl TupleValueType {
+    pub fn get_size(&self) -> Option<usize> {
+        match self {
+            TupleValueType::BigInt => Some(8),
+            TupleValueType::String => None,
+            TupleValueType::Int => Some(4),
+            TupleValueType::SmallInt => Some(2)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TupleValue {
-    Int(i64), // Only ints for now
+    BigInt(i64),
+    Int(i32),
+    SmallInt(i16),
+    String(String),
     // Float(f64),
-    // String(String),
     // Bool(bool),
     // Null,
 }
