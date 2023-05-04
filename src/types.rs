@@ -4,6 +4,12 @@ pub struct RelationTID {
     pub slot_id: u16
 }
 
+impl RelationTID {
+    pub fn new(page_id: u64, slot_id: u16) -> Self {
+        Self { page_id, slot_id }
+    }
+}
+
 impl From<u64> for RelationTID {
     fn from(input: u64) -> Self {
         Self { 

@@ -19,6 +19,8 @@ pub struct Tuple {
 }
 
 impl Tuple {
+
+    #[inline]
     pub fn parse_binary(attributes: Vec<TupleValueType>, src: &[u8]) -> Tuple { 
         let num_null_bytes = attributes.len() / 8 + 1;
         let num_null_values: u32 = src.iter().take(num_null_bytes).map(|b| b.count_ones()).sum();
@@ -63,6 +65,7 @@ impl Tuple {
         Tuple { values }
     }
 
+    #[inline]
     pub fn calculate_binary_length(&self) -> usize {
         let num_null_bytes = self.values.len() / 8 + 1;
         let mut length = num_null_bytes;
@@ -87,6 +90,7 @@ impl Tuple {
         length
     }
 
+    #[inline]
     pub fn write_binary(&self, buffer: &mut [u8]) {
         let num_null_bytes = self.values.len() / 8 + 1;
         let mut null_bytes = vec![0u8; num_null_bytes];

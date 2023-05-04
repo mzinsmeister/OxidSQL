@@ -1,7 +1,9 @@
 use std::{sync::Arc, collections::BTreeMap, ops::{Deref, DerefMut}};
-use crate::{storage::{buffer_manager::{BufferManager, BufferManagerError}, page::{Page, PAGE_SIZE, PageId}}, types::RelationTID};
+use parking_lot::{lock_api::{ArcMutexGuard, ArcRwLockReadGuard}, RwLock, RawRwLock};
 
-use super::free_space_inventory::FreeSpaceSegment;
+use crate::{storage::{buffer_manager::{BufferManager, BufferManagerError, BMArc}, page::{Page, PAGE_SIZE, PageId}}, types::RelationTID};
+
+use super::{free_space_inventory::FreeSpaceSegment, tuple::Tuple};
 
 // We implement a safe variant for now. Transmuting stuff like the header will likely lead to more
 // readable code but would need unsafe
@@ -301,6 +303,83 @@ impl<B: BufferManager> SlottedPageSegment<B> {
     pub fn resize_record(&self, tid: RelationTID, size: usize) -> Result<(), BufferManagerError> {
         self.resize_and_do(tid, size, true, |_| {})
     }
+
+    pub fn get_size(&self) -> u64 {
+        self.bm.segment_size(self.segment_id) as u64
+    }
+
+    // A scan operator allows us to pass a transformation that returns an Option so that the scan
+    // only returns the records that are not None. This way filters and tuple parsing can for example
+    // directly be pushed into the scan.
+    pub fn scan<T, F: FnMut(&[u8]) -> Option<T>>(&self, transformation: F) -> SlottedPageScan<B, T, impl FnMut(&[u8]) -> Option<T>> {
+        SlottedPageScan {
+            segment: &self,
+            page: None,
+            slot_id: 0,
+            page_id: 0,
+            transformation
+        }
+    }
+}
+
+pub struct SlottedPageScan<'a, B: BufferManager, T, F: FnMut(&[u8]) -> Option<T>> {
+    segment: &'a SlottedPageSegment<B>,
+    page: Option<BMArc<'a, B>>,
+    slot_id: u16,
+    page_id: u64,
+    transformation: F,
+}
+
+impl<'a, B: BufferManager, T, F: FnMut(&[u8]) -> Option<T>> Iterator for SlottedPageScan<'a, B, T, F> {
+    type Item = Result<(RelationTID, T), BufferManagerError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.page.is_none() {
+            if self.page_id < self.segment.get_size() {
+                self.page = Some(self.segment.bm.fix_page(PageId::new(self.segment.segment_id, self.page_id)).unwrap());
+            } else {
+                return None;
+            }
+        }
+        loop {
+            let page = self.page.as_ref().unwrap();
+            let slotted_page = SlottedPage::new(page.read());
+            loop {
+                if self.slot_id >= slotted_page.get_slot_count() {
+                    if self.page_id + 1 >= self.segment.get_size() {
+                        return None;
+                    }
+                    self.page_id += 1;
+                    drop(slotted_page);
+                    let new_page = self.segment.bm.fix_page(PageId::new(self.segment.segment_id, self.page_id)).unwrap();
+                    self.page = Some(new_page);
+                    self.slot_id = 0;
+                    break;
+                }
+                let slot = slotted_page.get_slot(self.slot_id);
+                match slot {
+                    Slot::Free | Slot::Redirect { tid: _ } => { /* Do nothing and continue scanning */ },
+                    Slot::RedirectTarget { offset, length } => {
+                        let tid = RelationTID::from(u64::from_be_bytes(slotted_page.get_record(offset, 8).try_into().unwrap()));
+                        let transform_result = (self.transformation)(slotted_page.get_record(offset + 8, length - 8));
+                        if let Some(transform_result) = transform_result {
+                            self.slot_id += 1;
+                            return Some(Ok((tid, transform_result)));
+                        }
+                    },
+                    Slot::Slot { offset, length } => {
+                        let tid = RelationTID::new(self.page_id, self.slot_id);
+                        let transform_result = (self.transformation)(slotted_page.get_record(offset, length));
+                        if let Some(transform_result) = transform_result {
+                            self.slot_id += 1;
+                            return Some(Ok((tid, transform_result)));
+                        }
+                    }
+                }
+                self.slot_id += 1;
+            }
+        }
+    }
 }
 
 struct SlottedPage<A: Deref<Target = Page>> {
@@ -360,6 +439,15 @@ impl<A: Deref<Target = Page>> SlottedPage<A> {
 
     fn get_record(&self, offset: u32, length: u32) -> &[u8] {
         get_record_from_page(&self.page, offset, length)
+    }
+
+    fn read_record(&self, slot_id: u16) -> Option<&[u8]> {
+        match self.get_slot(slot_id) {
+            Slot::Slot { offset, length } => Some(self.get_record(offset, length)),
+            Slot::Redirect { tid: _ } => None,
+            Slot::RedirectTarget { offset, length } => Some(self.get_record(offset + 8, length - 8)),
+            Slot::Free => None,
+        }
     }
 }
 
@@ -568,7 +656,7 @@ impl<A: Deref<Target = Page> + DerefMut<Target = Page>> SlottedPage<A> {
 mod test {
     use std::sync::Arc;
 
-    use crate::{storage::{disk::DiskManager, buffer_manager::{mock::MockBufferManager, BufferManager, HashTableBufferManager}, page::{PAGE_SIZE, PageId, PageState}, clock_replacer::ClockReplacer}, access::{slotted_page_segment::{HEADER_SIZE, self}}};
+    use crate::{storage::{disk::DiskManager, buffer_manager::{mock::MockBufferManager, BufferManager, HashTableBufferManager}, page::{PAGE_SIZE, PageId, PageState}, clock_replacer::ClockReplacer}, access::{slotted_page_segment::{HEADER_SIZE, self}}, types::RelationTID};
 
     use super::SlottedPageSegment;
 
@@ -920,5 +1008,63 @@ mod test {
         assert_eq!(record[7999], 40);
     }
 
+    #[test]
+    fn test_scan() {
+        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let testee = SlottedPageSegment::new(bm, 1, 0);
+        let records = vec![
+            vec![10u8; PAGE_SIZE - 2000],
+            vec![0u8; 500],
+            vec![50u8; 5000],
+            vec![100u8; 5000],
+            vec![40u8; PAGE_SIZE - 2000],
+        ];
+        for record in &records {
+            testee.insert_record(&record).unwrap();
+        }
+
+        let mut scan = testee.scan(|record| Some(Vec::from(record)));
+        assert_eq!(scan.next().unwrap().unwrap(), (RelationTID::new(0, 0), records[0].clone()));
+        assert_eq!(scan.next().unwrap().unwrap(), (RelationTID::new(0, 1), records[1].clone()));
+        assert_eq!(scan.next().unwrap().unwrap(), (RelationTID::new(1, 0), records[2].clone()));
+        assert_eq!(scan.next().unwrap().unwrap(), (RelationTID::new(1, 1), records[3].clone()));
+        assert_eq!(scan.next().unwrap().unwrap(), (RelationTID::new(2, 0), records[4].clone()));
+        assert!(scan.next().is_none());
+    }
+
+    #[test]
+    fn test_scan_with_relocates() {
+        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let testee = SlottedPageSegment::new(bm.clone(), 1, 0);
+        let records = vec![
+            vec![10u8; PAGE_SIZE - 2000],
+            vec![0u8; 500],
+            vec![50u8; 5000],
+            vec![100u8; 5000],
+            vec![40u8; PAGE_SIZE - 2000],
+        ];
+        for record in &records {
+            testee.insert_record(&record).unwrap();
+        }
+        let data = vec![40u8; PAGE_SIZE - 2000];
+        testee.write_record(RelationTID::new(0, 1), &data).unwrap();
+
+        let mut scan = testee.scan(|record| Some(Vec::from(record)));
+        assert_eq!(scan.next().unwrap().unwrap(), (RelationTID::new(0, 0), records[0].clone()));
+        assert_eq!(scan.next().unwrap().unwrap(), (RelationTID::new(1, 0), records[2].clone()));
+        assert_eq!(scan.next().unwrap().unwrap(), (RelationTID::new(1, 1), records[3].clone()));
+        assert_eq!(scan.next().unwrap().unwrap(), (RelationTID::new(2, 0), records[4].clone()));
+        assert_eq!(scan.next().unwrap().unwrap(), (RelationTID::new(0, 1), data.clone()));
+        assert!(scan.next().is_none());
+    }
+
+    #[test]
+    fn test_empty_scan() {
+        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let testee = SlottedPageSegment::new(bm, 1, 0);
+
+        let mut scan = testee.scan(|record| Some(Vec::from(record)));
+        assert!(scan.next().is_none());
+    }
     // TODO: Integration tests with actual disk writes
 }

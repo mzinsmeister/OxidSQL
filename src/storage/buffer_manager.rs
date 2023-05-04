@@ -2,6 +2,7 @@ use parking_lot::{RwLock, Mutex, MutexGuard};
 
 use crate::storage::page::{Page, PageState};
 use crate::util::align::alligned_slice;
+use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
 use std::fmt::Display;
@@ -11,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use super::disk::StorageManager;
-use super::page::{PageId, PAGE_SIZE};
+use super::page::{PageId, PAGE_SIZE, SegmentId};
 use super::replacer::Replacer;
 
 pub struct BMArc<'a, B: BufferManager> {
@@ -30,6 +31,18 @@ impl<'a, B: BufferManager> BMArc<'a, B> {
             unfix
         }
     }
+
+    /* This works but it has problems since it allows you to drop the BMArc 
+       without actually having dropped the Arc
+    pub fn write_owning(&self) -> ArcRwLockWriteGuard<RawRwLock, Page> {
+        self.page.write_arc()
+    }
+
+    pub fn read_owning(&self) -> ArcRwLockReadGuard<RawRwLock, Page> {
+        self.page.read_arc()
+    }
+    */
+    
 }
 
 impl<'a, B: BufferManager> Deref for BMArc<'a, B> {
@@ -130,6 +143,7 @@ impl PageTableBucket {
 pub trait BufferManager: Sync + Send + Sized {
     fn fix_page<'a>(&'a self, page_id: PageId) -> Result<BMArc<'a, Self>, BufferManagerError>;
     fn flush(&self) -> Result<(), BufferManagerError>;
+    fn segment_size(&self, segment_id: SegmentId) -> usize;
 }
 
 pub struct HashTableBufferManager<R: Replacer + Send, S: StorageManager> {
@@ -137,7 +151,8 @@ pub struct HashTableBufferManager<R: Replacer + Send, S: StorageManager> {
     pagetable_size: AtomicUsize,
     disk_manager: S,
     replacer: Mutex<R>,
-    size: usize
+    size: usize,
+    segment_sizes: RwLock<BTreeMap<u16, usize>>,
 }
 
 #[derive(Debug)]
@@ -188,7 +203,8 @@ impl<R: Replacer + Send, S: StorageManager> HashTableBufferManager<R, S> {
             pagetable_size: AtomicUsize::new(0),
             disk_manager,
             replacer: Mutex::new(replacer),
-            size
+            size,
+            segment_sizes: RwLock::new(BTreeMap::new()),
         };
     }
 
@@ -255,6 +271,11 @@ impl<R: Replacer + Send, S: StorageManager> HashTableBufferManager<R, S> {
                                 new_page_write.state = PageState::CLEAN;
                             } else {
                                 new_page_write.state = PageState::NEW;
+                                let mut segment_sizes = self.segment_sizes.write();
+                                if !segment_sizes.contains_key(&page_id.segment_id) {
+                                    segment_sizes.insert(page_id.segment_id, self.disk_manager.get_relation_size(page_id.segment_id) as usize / PAGE_SIZE);
+                                }
+                                *(segment_sizes.get_mut(&page_id.segment_id).unwrap()) += 1;
                             }
                             drop(new_page_write);
                             return Ok(new_page);
@@ -308,6 +329,15 @@ impl<R: Replacer + Send, S: StorageManager> BufferManager for HashTableBufferMan
         }
         Ok(())
     }
+
+    fn segment_size(&self, segment_id: SegmentId) -> usize {
+        let size = self.segment_sizes.read().get(&segment_id).cloned();
+        if let Some(size) = size {
+            size
+        } else {
+            self.disk_manager.get_relation_size(segment_id) as usize / PAGE_SIZE
+        }
+    }
 }
 
 impl<R: Replacer + Send, S: StorageManager> Drop for HashTableBufferManager<R, S> {
@@ -320,7 +350,7 @@ impl<R: Replacer + Send, S: StorageManager> Drop for HashTableBufferManager<R, S
 
 #[cfg(test)]
 pub mod mock {
-    use std::{collections::HashMap};
+    use std::{collections::HashMap, sync::Arc};
 
     use parking_lot::Mutex;
 
@@ -375,6 +405,16 @@ pub mod mock {
                 }
             }
             Ok(())
+        }
+
+        fn segment_size(&self, segment_id: crate::storage::page::SegmentId) -> usize {
+            let segments = self.segments.lock();
+            let segment = segments.get(&segment_id);
+            if let Some(segment) = segment {
+                segment.len()
+            } else {
+                0
+            }
         }
     }
 }

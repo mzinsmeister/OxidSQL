@@ -35,6 +35,7 @@ struct CatalogCache<B:BufferManager> {
 }
 
 #[repr(u16)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum DbObjectType {
     Relation = 0
 }
@@ -48,6 +49,7 @@ impl DbObjectType {
     }
 }
 
+#[derive(Clone, Debug)]
 struct DbObjectDesc {
     id: u32,
     name: String,
@@ -88,11 +90,23 @@ struct DbObjectCatalogSegment<B: BufferManager> {
 }
 
 impl<B: BufferManager> DbObjectCatalogSegment<B> {
+    fn find_first_db_object<F: Fn(&DbObjectDesc) -> bool>(&self, filter: F) -> Option<DbObjectDesc> {
+        let mut scan = self.sp_segment.scan(|data| {
+            let db_object_desc = DbObjectDesc::parse_tuple(data);
+            if filter(&db_object_desc) {
+                Some(db_object_desc)
+            } else {
+                None
+            }
+        });
+        scan.next().map(|f| f.unwrap().1)
+    }
+
     fn get_db_object_by_id(&self, id: u32) -> Option<DbObjectDesc> {
-        unimplemented!()
+        self.find_first_db_object(|db_object_desc| db_object_desc.id == id)
     }
 
     fn find_db_object_by_name(&self, obj_type: DbObjectType, name: &str) -> Option<DbObjectDesc> {
-        unimplemented!()
+        self.find_first_db_object(|db_object_desc| db_object_desc.class_type == obj_type && db_object_desc.name == name)
     }
 }
