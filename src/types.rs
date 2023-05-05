@@ -55,3 +55,33 @@ pub enum TupleValue {
     // Bool(bool),
     // Null,
 }
+
+impl TupleValue {
+    pub fn as_big_int(&self) -> i64 {
+        match self {
+            TupleValue::BigInt(value) => *value,
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn as_int(&self) -> i32 {
+        match self {
+            TupleValue::Int(value) => *value,
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn as_small_int(&self) -> i16 {
+        match self {
+            TupleValue::SmallInt(value) => *value,
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn as_varchar(&self) -> &str {
+        match self {
+            TupleValue::String(value) => value,
+            _ => unreachable!(),
+        }
+    }
+}

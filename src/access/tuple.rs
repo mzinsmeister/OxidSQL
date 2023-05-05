@@ -140,6 +140,14 @@ impl Tuple {
     }
 }
 
+impl From<Tuple> for Box<[u8]> {
+    fn from(value: Tuple) -> Self {
+        let mut buffer = vec![0u8; value.calculate_binary_length()];
+        value.write_binary(&mut buffer);
+        buffer.into_boxed_slice()
+    }
+}
+
 #[cfg(test)]
 mod test {
 
