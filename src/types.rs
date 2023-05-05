@@ -26,18 +26,19 @@ impl From<&RelationTID> for u64 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u16)]
 pub enum TupleValueType {
-    BigInt,
-    String,
-    Int,
-    SmallInt
+    BigInt = 0,
+    VarChar(u16) = 1,
+    Int = 2,
+    SmallInt = 3
 }
 
 impl TupleValueType {
     pub fn get_size(&self) -> Option<usize> {
         match self {
             TupleValueType::BigInt => Some(8),
-            TupleValueType::String => None,
+            TupleValueType::VarChar(_) => None,
             TupleValueType::Int => Some(4),
             TupleValueType::SmallInt => Some(2)
         }

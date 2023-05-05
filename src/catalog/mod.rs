@@ -2,9 +2,7 @@ use std::{sync::Arc};
 
 use crate::{access::{SlottedPageSegment, tuple::Tuple}, storage::buffer_manager::BufferManager, types::{TupleValueType, TupleValue}};
 
-pub struct DbObjectRef {
-    table_id: u16
-}
+type DbObjectRef = u16;
 
 pub struct ColumnRef {
     table_ref: DbObjectRef,
@@ -65,7 +63,7 @@ impl From<&[u8]> for DbObjectDesc {
     fn from(value: &[u8]) -> Self {
         let parsed_tuple = Tuple::parse_binary(vec![
             TupleValueType::Int,
-            TupleValueType::String,
+            TupleValueType::VarChar,
             TupleValueType::SmallInt,
             TupleValueType::SmallInt
         ], value);
@@ -136,6 +134,28 @@ impl<B: BufferManager> DbObjectCatalogSegment<B> {
         let mut data = vec![0; tuple.calculate_binary_length()];
         tuple.write_binary(&mut data);
         self.sp_segment.insert_record(&data).unwrap();
+    }
+}
+
+struct AttributeDesc {
+    id: u32,
+    name: String,
+    data_type: TupleValueType,
+    length: u32,
+    nullable: bool,
+    /*default_value: Option<String>,*/
+    table_ref: DbObjectRef,
+}
+
+struct AttributeCatalogSegment<B: BufferManager> {
+    sp_segment: SlottedPageSegment<B>,
+}
+
+impl<B: BufferManager> AttributeCatalogSegment<B> {
+    fn new(buffer_manager: Arc<B>) -> AttributeCatalogSegment<B> {
+        AttributeCatalogSegment {
+            sp_segment: SlottedPageSegment::new(buffer_manager, ATTRIBUTE_CATALOG_SEGMENT_ID, ATTRIBUTE_CATALOG_SEGMENT_ID + 1)
+        }
     }
 }
 

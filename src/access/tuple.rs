@@ -41,7 +41,7 @@ impl Tuple {
                     TupleValueType::BigInt => {
                         values.push(Some(TupleValue::BigInt(cursor.read_i64::<BigEndian>().unwrap())));
                     },
-                    TupleValueType::String => {
+                    TupleValueType::VarChar(_) => {
                         var_atts.push((values.len(), attribute_type, cursor.read_u16::<BigEndian>().unwrap()));
                         values.push(None);
                     }
@@ -59,7 +59,7 @@ impl Tuple {
         // now read the variable length attributes
         for (index, attribute_type, length) in var_atts {
             match attribute_type {
-                TupleValueType::String => {
+                TupleValueType::VarChar(_) => {
                     let mut string = String::with_capacity(length as usize);
                     cursor.read_to_string(&mut string).unwrap();
                     values[index] = Some(TupleValue::String(string));
@@ -151,7 +151,7 @@ mod test {
     fn test_parse_binary() {
         let attributes = vec![
             TupleValueType::Int,
-            TupleValueType::String,
+            TupleValueType::VarChar(u16::MAX),
             TupleValueType::Int,
             TupleValueType::BigInt,
             TupleValueType::SmallInt];
@@ -193,7 +193,7 @@ mod test {
         tuple.write_binary(&mut buffer);
         let tuple = Tuple::parse_binary(vec![
             TupleValueType::Int,
-            TupleValueType::String,
+            TupleValueType::VarChar(u16::MAX),
             TupleValueType::Int], &buffer);
         assert_eq!(tuple.values.len(), 3);
         assert_eq!(tuple.values[0], None);
