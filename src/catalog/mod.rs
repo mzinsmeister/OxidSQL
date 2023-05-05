@@ -25,6 +25,9 @@ pub struct ColumnRef {
     (that's it FOR NOW. Additional columns will be added over time)
  */
 
+const DB_OBJECT_CATALOG_SEGMENT_ID: u16 = 0;
+const ATTRIBUTE_CATALOG_SEGMENT_ID: u16 = 2;
+
 struct Catalog<B: BufferManager> {
     cache: Arc<CatalogCache<B>>,
 }
@@ -57,14 +60,15 @@ struct DbObjectDesc {
     segment_id: u16, //convention: the FSI segment will always get the next segment id if the object requires one
 }
 
-impl DbObjectDesc {
-    fn parse_tuple(tuple: &[u8]) -> DbObjectDesc {
+impl From<&[u8]> for DbObjectDesc {
+
+    fn from(value: &[u8]) -> Self {
         let parsed_tuple = Tuple::parse_binary(vec![
             TupleValueType::Int,
             TupleValueType::String,
             TupleValueType::SmallInt,
             TupleValueType::SmallInt
-        ], tuple);
+        ], value);
         let id = match parsed_tuple.values[0] {
             Some(TupleValue::Int(id)) => id,
             _ => unreachable!()
@@ -85,14 +89,31 @@ impl DbObjectDesc {
     }
 }
 
+impl From<&DbObjectDesc> for Tuple {
+    fn from(value: &DbObjectDesc) -> Self {
+        Tuple::new(vec![
+            Some(TupleValue::Int(value.id as i32)),
+            Some(TupleValue::String(value.name.clone())),
+            Some(TupleValue::SmallInt(value.class_type as i16)),
+            Some(TupleValue::SmallInt(value.segment_id as i16))
+        ])
+    }
+}
+
 struct DbObjectCatalogSegment<B: BufferManager> {
     sp_segment: SlottedPageSegment<B>,
 }
 
 impl<B: BufferManager> DbObjectCatalogSegment<B> {
+    fn new(buffer_manager: Arc<B>) -> DbObjectCatalogSegment<B> {
+        DbObjectCatalogSegment {
+            sp_segment: SlottedPageSegment::new(buffer_manager, DB_OBJECT_CATALOG_SEGMENT_ID, DB_OBJECT_CATALOG_SEGMENT_ID + 1)
+        }
+    }
+
     fn find_first_db_object<F: Fn(&DbObjectDesc) -> bool>(&self, filter: F) -> Option<DbObjectDesc> {
         let mut scan = self.sp_segment.scan(|data| {
-            let db_object_desc = DbObjectDesc::parse_tuple(data);
+            let db_object_desc = DbObjectDesc::from(data);
             if filter(&db_object_desc) {
                 Some(db_object_desc)
             } else {
@@ -108,5 +129,46 @@ impl<B: BufferManager> DbObjectCatalogSegment<B> {
 
     fn find_db_object_by_name(&self, obj_type: DbObjectType, name: &str) -> Option<DbObjectDesc> {
         self.find_first_db_object(|db_object_desc| db_object_desc.class_type == obj_type && db_object_desc.name == name)
+    }
+
+    fn insert_db_object(&self, db_object: &DbObjectDesc) {
+        let tuple = Tuple::from(db_object);
+        let mut data = vec![0; tuple.calculate_binary_length()];
+        tuple.write_binary(&mut data);
+        self.sp_segment.insert_record(&data).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::{storage::{page::PAGE_SIZE, buffer_manager::mock::MockBufferManager}};
+
+
+    #[test]
+    fn test_catalog_segment_db_object_by_id() {
+        let buffer_manager = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let catalog_segment = DbObjectCatalogSegment::new(buffer_manager.clone());
+        let db_object_desc = DbObjectDesc { id: 0, name: "db_object".to_string(), class_type: DbObjectType::Relation, segment_id: 1 };
+        catalog_segment.insert_db_object(&db_object_desc);
+        let db_object_desc = catalog_segment.get_db_object_by_id(0).unwrap();
+        assert_eq!(db_object_desc.name, "db_object");
+        assert_eq!(db_object_desc.class_type, crate::catalog::DbObjectType::Relation);
+        assert_eq!(db_object_desc.segment_id, 1);
+    }
+
+    #[test]
+    fn test_catalog_segment_db_object_by_name() {
+        let buffer_manager = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let catalog_segment = DbObjectCatalogSegment::new(buffer_manager.clone());
+        let db_object_desc = DbObjectDesc { id: 0, name: "db_object".to_string(), class_type: DbObjectType::Relation, segment_id: 1 };
+        catalog_segment.insert_db_object(&db_object_desc);
+        let db_object_desc = catalog_segment.find_db_object_by_name(DbObjectType::Relation, "db_object").unwrap();
+        assert_eq!(db_object_desc.id, 0);
+        assert_eq!(db_object_desc.name, "db_object");
+        assert_eq!(db_object_desc.class_type, crate::catalog::DbObjectType::Relation);
+        assert_eq!(db_object_desc.segment_id, 1);
     }
 }

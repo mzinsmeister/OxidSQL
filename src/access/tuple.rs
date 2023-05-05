@@ -21,6 +21,11 @@ pub struct Tuple {
 impl Tuple {
 
     #[inline]
+    pub fn new(values: Vec<Option<TupleValue>>) -> Tuple {
+        Tuple { values }
+    }
+
+    #[inline]
     pub fn parse_binary(attributes: Vec<TupleValueType>, src: &[u8]) -> Tuple { 
         let num_null_bytes = attributes.len() / 8 + 1;
         let num_null_values: u32 = src.iter().take(num_null_bytes).map(|b| b.count_ones()).sum();
