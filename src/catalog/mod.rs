@@ -63,7 +63,7 @@ impl From<&[u8]> for DbObjectDesc {
     fn from(value: &[u8]) -> Self {
         let parsed_tuple = Tuple::parse_binary(vec![
             TupleValueType::Int,
-            TupleValueType::VarChar,
+            TupleValueType::VarChar(u16::MAX),
             TupleValueType::SmallInt,
             TupleValueType::SmallInt
         ], value);
