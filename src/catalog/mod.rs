@@ -1,6 +1,6 @@
 use std::{sync::Arc};
 
-use crate::{access::{SlottedPageSegment, tuple::Tuple}, storage::buffer_manager::{BufferManager, BufferManagerError}, types::{TupleValueType, TupleValue, RelationTID}};
+use crate::{access::{SlottedPageSegment, tuple::Tuple}, storage::{buffer_manager::{BufferManager, BufferManagerError}, page::SegmentId}, types::{TupleValueType, TupleValue, RelationTID}};
 
 type DbObjectRef = u32;
 
@@ -26,13 +26,40 @@ pub struct ColumnRef {
 const DB_OBJECT_CATALOG_SEGMENT_ID: u16 = 0;
 const ATTRIBUTE_CATALOG_SEGMENT_ID: u16 = 2;
 
+struct TableDesc {
+    id: u32,
+    name: String,
+    attributes: Vec<AttributeDesc>,
+    segment_id: SegmentId
+}
+
 struct Catalog<B: BufferManager> {
     cache: Arc<CatalogCache<B>>,
 }
 
 struct CatalogCache<B:BufferManager> {
-    catalog_sp_segment: SlottedPageSegment<B>
+    db_object_segment: DbObjectCatalogSegment<B>,
+    attribute_segment: AttributeCatalogSegment<B>
     // TODO: Agressively Cache stuff here
+}
+
+impl<B: BufferManager> CatalogCache<B> {
+    fn new(buffer_manager: Arc<B>) -> CatalogCache<B> {
+        CatalogCache {
+            db_object_segment: DbObjectCatalogSegment::new(buffer_manager.clone()),
+            attribute_segment: AttributeCatalogSegment::new(buffer_manager.clone())
+        }
+    }
+
+    fn find_table_by_name(&self, name: &str) -> Result<Option<TableDesc>, BufferManagerError> {
+        let db_object = self.db_object_segment.find_db_object_by_name(DbObjectType::Relation, name);
+        if let Some(db_object) = db_object {
+            let attributes = self.attribute_segment.get_attributes_by_db_object(db_object.id);
+            Ok(Some(TableDesc { id: db_object.id, name: db_object.name, attributes, segment_id: db_object.segment_id }))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 #[repr(u16)]
@@ -55,7 +82,7 @@ struct DbObjectDesc {
     id: u32,
     name: String,
     class_type: DbObjectType,
-    segment_id: u16, //convention: the FSI segment will always get the next segment id if the object requires one
+    segment_id: SegmentId, //convention: the FSI segment will always get the next segment id if the object requires one
 }
 
 impl From<&[u8]> for DbObjectDesc {
@@ -315,7 +342,7 @@ mod test {
         let db_object_desc = DbObjectDesc { id: 0, name: "db_object".to_string(), class_type: DbObjectType::Relation, segment_id: 1 };
         catalog_segment.insert_db_object(&db_object_desc).unwrap();
         let attribute_descs = vec![
-            AttributeDesc { id: 0, name: "attribute".to_string(), data_type: TupleValueType::Int, nullable: false, table_ref: 0 },
+            AttributeDesc { id: 0, name: "attribute".to_string(), data_type: TupleValueType::VarChar(232), nullable: false, table_ref: 0 },
             AttributeDesc { id: 1, name: "abc".to_string(), data_type: TupleValueType::BigInt, nullable: true, table_ref: 0 },
             AttributeDesc { id: 2, name: "cba".to_string(), data_type: TupleValueType::SmallInt, nullable: true, table_ref: 1 }
         ];
