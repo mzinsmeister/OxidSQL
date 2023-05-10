@@ -26,11 +26,12 @@ pub struct ColumnRef {
 const DB_OBJECT_CATALOG_SEGMENT_ID: u16 = 0;
 const ATTRIBUTE_CATALOG_SEGMENT_ID: u16 = 2;
 
-struct TableDesc {
-    id: u32,
-    name: String,
-    attributes: Vec<AttributeDesc>,
-    segment_id: SegmentId
+#[derive(Clone, Debug)]
+pub struct TableDesc {
+    pub id: u32,
+    pub name: String,
+    pub attributes: Vec<AttributeDesc>,
+    pub segment_id: SegmentId
 }
 
 struct Catalog<B: BufferManager> {
@@ -44,7 +45,7 @@ struct CatalogCache<B:BufferManager> {
 }
 
 impl<B: BufferManager> CatalogCache<B> {
-    fn new(buffer_manager: Arc<B>) -> CatalogCache<B> {
+    fn new(buffer_manager: B) -> CatalogCache<B> {
         CatalogCache {
             db_object_segment: DbObjectCatalogSegment::new(buffer_manager.clone()),
             attribute_segment: AttributeCatalogSegment::new(buffer_manager.clone())
@@ -88,7 +89,7 @@ struct DbObjectDesc {
 impl From<&[u8]> for DbObjectDesc {
 
     fn from(value: &[u8]) -> Self {
-        let parsed_tuple = Tuple::parse_binary(vec![
+        let parsed_tuple = Tuple::parse_binary(&vec![
             TupleValueType::Int,
             TupleValueType::VarChar(u16::MAX),
             TupleValueType::SmallInt,
@@ -130,14 +131,14 @@ struct DbObjectCatalogSegment<B: BufferManager> {
 }
 
 impl<B: BufferManager> DbObjectCatalogSegment<B> {
-    fn new(buffer_manager: Arc<B>) -> DbObjectCatalogSegment<B> {
+    fn new(buffer_manager: B) -> DbObjectCatalogSegment<B> {
         DbObjectCatalogSegment {
             sp_segment: SlottedPageSegment::new(buffer_manager, DB_OBJECT_CATALOG_SEGMENT_ID, DB_OBJECT_CATALOG_SEGMENT_ID + 1)
         }
     }
 
     fn find_first_db_object<F: Fn(&DbObjectDesc) -> bool>(&self, filter: F) -> Option<(RelationTID, DbObjectDesc)> {
-        let mut scan = self.sp_segment.scan(|data| {
+        let mut scan = self.sp_segment.clone().scan(|data| {
             let db_object_desc = DbObjectDesc::from(data);
             if filter(&db_object_desc) {
                 Some(db_object_desc)
@@ -174,18 +175,18 @@ impl<B: BufferManager> DbObjectCatalogSegment<B> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct AttributeDesc {
-    id: u32,
-    name: String,
-    data_type: TupleValueType,
-    nullable: bool,
+pub struct AttributeDesc {
+    pub id: u32,
+    pub name: String,
+    pub data_type: TupleValueType,
+    pub nullable: bool,
     /*default_value: Option<String>,*/
-    table_ref: DbObjectRef,
+    pub table_ref: DbObjectRef,
 }
 
 impl From<&[u8]> for AttributeDesc {
     fn from(value: &[u8]) -> Self {
-        let parsed_tuple = Tuple::parse_binary(vec![
+        let parsed_tuple = Tuple::parse_binary(&vec![
             TupleValueType::Int, // db_object_id
             TupleValueType::Int, // id
             TupleValueType::VarChar(u16::MAX), // name
@@ -250,14 +251,14 @@ struct AttributeCatalogSegment<B: BufferManager> {
 }
 
 impl<B: BufferManager> AttributeCatalogSegment<B> {
-    fn new(buffer_manager: Arc<B>) -> AttributeCatalogSegment<B> {
+    fn new(buffer_manager: B) -> AttributeCatalogSegment<B> {
         AttributeCatalogSegment {
             sp_segment: SlottedPageSegment::new(buffer_manager, ATTRIBUTE_CATALOG_SEGMENT_ID, ATTRIBUTE_CATALOG_SEGMENT_ID + 1)
         }
     }
 
     fn get_attributes_by_db_object(&self, db_object_id: u32) -> Vec<AttributeDesc> {
-        self.sp_segment.scan(|data| {
+        self.sp_segment.clone().scan(|data| {
             let attribute_desc = AttributeDesc::from(data);
             if attribute_desc.table_ref == db_object_id {
                 Some(attribute_desc)
@@ -268,7 +269,7 @@ impl<B: BufferManager> AttributeCatalogSegment<B> {
     }
 
     fn get_attribute_by_db_object_and_name(&self, db_object_id: u32, name: &str) -> Option<AttributeDesc> {
-        self.sp_segment.scan(|data| {
+        self.sp_segment.clone().scan(|data| {
             let attribute_desc = AttributeDesc::from(data);
             if attribute_desc.table_ref == db_object_id && attribute_desc.name == name {
                 Some(attribute_desc)
@@ -287,7 +288,7 @@ impl<B: BufferManager> AttributeCatalogSegment<B> {
     }
 
     fn update_attribute(&self, attribute: AttributeDesc) -> Result<(), BufferManagerError> {
-        let (tid, _) = self.sp_segment.scan(|data| {
+        let (tid, _) = self.sp_segment.clone().scan(|data| {
             let attribute_desc = AttributeDesc::from(data);
             if attribute_desc.id == attribute.id {
                 Some(attribute_desc)
@@ -304,7 +305,6 @@ impl<B: BufferManager> AttributeCatalogSegment<B> {
 
 #[cfg(test)]
 mod test {
-    use std::sync::Arc;
 
     use super::*;
     use crate::{storage::{page::PAGE_SIZE, buffer_manager::mock::MockBufferManager}};
@@ -312,7 +312,7 @@ mod test {
 
     #[test]
     fn test_catalog_segment_db_object_by_id() {
-        let buffer_manager = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let buffer_manager = MockBufferManager::new(PAGE_SIZE);
         let catalog_segment = DbObjectCatalogSegment::new(buffer_manager.clone());
         let db_object_desc = DbObjectDesc { id: 0, name: "db_object".to_string(), class_type: DbObjectType::Relation, segment_id: 1 };
         catalog_segment.insert_db_object(&db_object_desc).unwrap();
@@ -324,7 +324,7 @@ mod test {
 
     #[test]
     fn test_catalog_segment_db_object_by_name() {
-        let buffer_manager = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let buffer_manager = MockBufferManager::new(PAGE_SIZE);
         let catalog_segment = DbObjectCatalogSegment::new(buffer_manager.clone());
         let db_object_desc = DbObjectDesc { id: 0, name: "db_object".to_string(), class_type: DbObjectType::Relation, segment_id: 1 };
         catalog_segment.insert_db_object(&db_object_desc).unwrap();
@@ -336,7 +336,7 @@ mod test {
     }
 
     fn test_catalog_segment_attributes_by_db_object() {
-        let buffer_manager = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let buffer_manager = MockBufferManager::new(PAGE_SIZE);
         let catalog_segment = DbObjectCatalogSegment::new(buffer_manager.clone());
         let attribute_catalog_segment = AttributeCatalogSegment::new(buffer_manager.clone());
         let db_object_desc = DbObjectDesc { id: 0, name: "db_object".to_string(), class_type: DbObjectType::Relation, segment_id: 1 };
@@ -359,7 +359,7 @@ mod test {
     }
 
     fn test_catalog_segment_attribute_by_db_object_and_name() {
-        let buffer_manager = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let buffer_manager = MockBufferManager::new(PAGE_SIZE);
         let catalog_segment = DbObjectCatalogSegment::new(buffer_manager.clone());
         let attribute_catalog_segment = AttributeCatalogSegment::new(buffer_manager.clone());
         let db_object_desc = DbObjectDesc { id: 0, name: "db_object".to_string(), class_type: DbObjectType::Relation, segment_id: 1 };

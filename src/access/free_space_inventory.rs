@@ -33,14 +33,15 @@ If this ever gets too slow or we get problems with too many inserts getting cont
 or the pages they get we could group pages by mod 100 for example and go around them clockwise with every request
 coming in.
 */
+#[derive(Debug, Clone)]
 pub struct FreeSpaceSegment<B: BufferManager> {
-    bm: Arc<B>,
+    bm: B,
     segment_id: u16,
     max_useable_space: usize
 }
 
 impl<B: BufferManager> FreeSpaceSegment<B> {
-    pub fn new(segment_id: u16, max_useable_space: usize, bm: Arc<B>) -> Self {
+    pub fn new(segment_id: u16, max_useable_space: usize, bm: B) -> Self {
         Self { bm, segment_id, max_useable_space }
     }
 
@@ -185,7 +186,7 @@ mod test {
     
     #[test]
     fn first_cache() {
-        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let bm = MockBufferManager::new(PAGE_SIZE);
         let testee = FreeSpaceSegment::new(0, 1000, bm);
         assert_eq!(testee.find_page(1000).unwrap(), 0);
         assert_eq!(testee.find_page(10).unwrap(), 0);
@@ -195,7 +196,7 @@ mod test {
 
     #[test]
     fn update_cache_completely() {
-        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let bm = MockBufferManager::new(PAGE_SIZE);
         let testee = FreeSpaceSegment::new(0, 1000, bm);
         testee.update_page_size(0, 0);
         assert_eq!(testee.find_page(1000).unwrap(), 1);
@@ -206,7 +207,7 @@ mod test {
 
     #[test]
     fn update_cache_partly() {
-        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let bm = MockBufferManager::new(PAGE_SIZE);
         let testee = FreeSpaceSegment::new(0, 1000, bm);
         testee.update_page_size(0, 500);
         assert_eq!(testee.find_page(1000).unwrap(), 1);

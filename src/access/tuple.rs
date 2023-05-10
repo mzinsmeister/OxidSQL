@@ -26,7 +26,7 @@ impl Tuple {
     }
 
     #[inline]
-    pub fn parse_binary(attributes: Vec<TupleValueType>, src: &[u8]) -> Tuple { 
+    pub fn parse_binary(attributes: &[TupleValueType], src: &[u8]) -> Tuple { 
         let num_null_bytes = attributes.len() / 8 + 1;
         let num_null_values: u32 = src.iter().take(num_null_bytes).map(|b| b.count_ones()).sum();
         let mut values = Vec::with_capacity(attributes.len() - num_null_values as usize);
@@ -138,13 +138,24 @@ impl Tuple {
         cursor.set_position(0);
         cursor.write(&null_bytes).unwrap();
     }
+
+    #[inline]
+    pub fn get_binary(&self) -> Box<[u8]> {
+        self.into()
+    }
+}
+
+impl From<&Tuple> for Box<[u8]> {
+    fn from(value: &Tuple) -> Self {
+        let mut buffer = vec![0u8; value.calculate_binary_length()];
+        value.write_binary(&mut buffer);
+        buffer.into_boxed_slice()
+    }
 }
 
 impl From<Tuple> for Box<[u8]> {
     fn from(value: Tuple) -> Self {
-        let mut buffer = vec![0u8; value.calculate_binary_length()];
-        value.write_binary(&mut buffer);
-        buffer.into_boxed_slice()
+        value.into()
     }
 }
 
@@ -163,7 +174,7 @@ mod test {
             TupleValueType::Int,
             TupleValueType::BigInt,
             TupleValueType::SmallInt];
-        let tuple = Tuple::parse_binary(attributes.clone(), TEST_BINARY);
+        let tuple = Tuple::parse_binary(&attributes, TEST_BINARY);
         assert_eq!(tuple.values.len(), 5);
         assert_eq!(tuple.values[0], None);
         assert_eq!(tuple.values[1], Some(TupleValue::String("ab".to_string())));
@@ -199,7 +210,7 @@ mod test {
         };
         let mut buffer = vec![0u8; tuple.calculate_binary_length()];
         tuple.write_binary(&mut buffer);
-        let tuple = Tuple::parse_binary(vec![
+        let tuple = Tuple::parse_binary(&vec![
             TupleValueType::Int,
             TupleValueType::VarChar(u16::MAX),
             TupleValueType::Int], &buffer);

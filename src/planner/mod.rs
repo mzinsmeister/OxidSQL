@@ -4,4 +4,21 @@
           the optimizer module.
  */
 
-pub mod plan;
+
+ pub enum PlannerError {}
+ 
+ /*
+ pub trait Planner {
+     fn plan(&self, query: &Query) -> Result<PhysicalPlan, PlannerError>;
+ }
+ 
+ // Default Planner using the DPccp algorithm for optimization
+ pub type DefaultPlanner = DPccpPlanner;
+ 
+ pub struct DPccpPlanner {}
+ 
+ impl Planner for DPccpPlanner {
+     fn plan(&self, query: &Query) -> Result<PhysicalPlan, PlannerError> {
+         unimplemented!()
+     }
+ }*/

@@ -100,8 +100,9 @@ impl From<&Slot> for [u8; 8] {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct SlottedPageSegment<B: BufferManager> {
-    bm: Arc<B>,
+    bm: B,
     segment_id: u16,
     free_space_segment: FreeSpaceSegment<B>
 }
@@ -111,7 +112,7 @@ impl<B: BufferManager> SlottedPageSegment<B> {
         PAGE_SIZE - HEADER_SIZE - SLOT_SIZE
     }
 
-    pub fn new(bm: Arc<B>, segment_id: u16, free_space_segment_id: u16) -> SlottedPageSegment<B> {
+    pub fn new(bm: B, segment_id: u16, free_space_segment_id: u16) -> SlottedPageSegment<B> {
         SlottedPageSegment {
             bm: bm.clone(),
             segment_id,
@@ -311,9 +312,9 @@ impl<B: BufferManager> SlottedPageSegment<B> {
     // A scan operator allows us to pass a transformation that returns an Option so that the scan
     // only returns the records that are not None. This way filters and tuple parsing can for example
     // directly be pushed into the scan.
-    pub fn scan<T, F: FnMut(&[u8]) -> Option<T>>(&self, transformation: F) -> SlottedPageScan<B, T, impl FnMut(&[u8]) -> Option<T>> {
+    pub fn scan<'a, T, F: FnMut(&[u8]) -> Option<T>>(self, transformation: F) -> SlottedPageScan<B, T, impl FnMut(&[u8]) -> Option<T>> {
         SlottedPageScan {
-            segment: &self,
+            segment: self,
             page: None,
             slot_id: 0,
             page_id: 0,
@@ -322,15 +323,15 @@ impl<B: BufferManager> SlottedPageSegment<B> {
     }
 }
 
-pub struct SlottedPageScan<'a, B: BufferManager, T, F: FnMut(&[u8]) -> Option<T>> {
-    segment: &'a SlottedPageSegment<B>,
-    page: Option<BMArc<'a, B>>,
+pub struct SlottedPageScan<B: BufferManager, T, F: FnMut(&[u8]) -> Option<T>> {
+    segment: SlottedPageSegment<B>,
+    page: Option<BMArc<B>>,
     slot_id: u16,
     page_id: u64,
     transformation: F,
 }
 
-impl<'a, B: BufferManager, T, F: FnMut(&[u8]) -> Option<T>> Iterator for SlottedPageScan<'a, B, T, F> {
+impl<'a, B: BufferManager, T, F: FnMut(&[u8]) -> Option<T>> Iterator for SlottedPageScan<B, T, F> {
     type Item = Result<(RelationTID, T), BufferManagerError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -663,14 +664,14 @@ mod test {
     
     #[test]
     fn allocate_succeeds() {
-        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let bm = MockBufferManager::new(PAGE_SIZE);
         let testee = SlottedPageSegment::new(bm, 1, 0);
         assert!(testee.allocate(100).is_ok());
     }
 
     #[test]
     fn allocate_allocates() {
-        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let bm = MockBufferManager::new(PAGE_SIZE);
         let testee = SlottedPageSegment::new(bm, 1, 0);
         let tid = testee.allocate(100).unwrap();
         let record = testee.get_record(tid, |record| {Vec::from(record)}).unwrap();
@@ -679,7 +680,7 @@ mod test {
 
     #[test]
     fn write_writes() {
-        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let bm = MockBufferManager::new(PAGE_SIZE);
         let testee = SlottedPageSegment::new(bm, 1, 0);
         let mut data = vec![0u8; 500];
         data[0] = 1;
@@ -695,7 +696,7 @@ mod test {
 
     #[test]
     fn write_dirties_page() {
-        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let bm = MockBufferManager::new(PAGE_SIZE);
         let testee = SlottedPageSegment::new(bm.clone(), 1, 0);
         let data = vec![0u8; 500];
         let tid = testee.insert_record(&data).unwrap();
@@ -705,7 +706,7 @@ mod test {
 
     #[test]
     fn write_twice_gives_different_tids() {
-        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let bm = MockBufferManager::new(PAGE_SIZE);
         let testee = SlottedPageSegment::new(bm, 1, 0);
         let mut data = vec![0u8; 500];
         data[0] = 1;
@@ -722,7 +723,7 @@ mod test {
 
     #[test]
     fn write_twice_doesnt_overwrite() {
-        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let bm = MockBufferManager::new(PAGE_SIZE);
         let testee = SlottedPageSegment::new(bm, 1, 0);
         let mut data = vec![0u8; 500];
         data[0] = 1;
@@ -743,7 +744,7 @@ mod test {
 
     #[test]
     fn write_twice_writes_second() {
-        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let bm = MockBufferManager::new(PAGE_SIZE);
         let testee = SlottedPageSegment::new(bm, 1, 0);
         let mut data = vec![0u8; 500];
         data[0] = 1;
@@ -764,7 +765,7 @@ mod test {
     
     #[test]
     fn allocate_max() {
-        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let bm = MockBufferManager::new(PAGE_SIZE);
         let testee = SlottedPageSegment::new(bm, 1, 0);
         let size = PAGE_SIZE - HEADER_SIZE - 8;
         let mut data = vec![0u8; size];
@@ -782,7 +783,7 @@ mod test {
 
     #[test]
     fn allocate_max_twice_gives_differnt_pages() {
-        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let bm = MockBufferManager::new(PAGE_SIZE);
         let testee = SlottedPageSegment::new(bm, 1, 0);
         let size = PAGE_SIZE - HEADER_SIZE - 8;
         let data = vec![0u8; size];
@@ -793,7 +794,7 @@ mod test {
 
     #[test]
     fn allocate_max_twice_dirties_only_second() {
-        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let bm = MockBufferManager::new(PAGE_SIZE);
         let testee = SlottedPageSegment::new(bm.clone(), 1, 0);
         let size = PAGE_SIZE - HEADER_SIZE - 8;
         let data = vec![0u8; size];
@@ -806,7 +807,7 @@ mod test {
 
     #[test]
     fn allocate_max_second_gives_differnt_pages() {
-        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let bm = MockBufferManager::new(PAGE_SIZE);
         let testee = SlottedPageSegment::new(bm, 1, 0);
         let size = PAGE_SIZE - HEADER_SIZE - 8;
         let data = vec![1u8; 1];
@@ -818,7 +819,7 @@ mod test {
 
     #[test]
     fn update_with_redirect() {
-        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let bm = MockBufferManager::new(PAGE_SIZE);
         let testee = SlottedPageSegment::new(bm, 1, 0);
         let data = vec![10u8; PAGE_SIZE - 2000];
         testee.insert_record(&data).unwrap();
@@ -839,7 +840,7 @@ mod test {
     
     #[test]
     fn update_with_redirect_dirties_both() {
-        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let bm = MockBufferManager::new(PAGE_SIZE);
         let testee = SlottedPageSegment::new(bm.clone(), 1, 0);
         let data = vec![10u8; PAGE_SIZE - 2000];
         let tid1 = testee.insert_record(&data).unwrap();
@@ -853,7 +854,7 @@ mod test {
 
     #[test]
     fn update_with_redirect_back_to_root() {
-        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let bm = MockBufferManager::new(PAGE_SIZE);
         let testee = SlottedPageSegment::new(bm, 1, 0);
         let data = vec![10u8; PAGE_SIZE - 2000];
         testee.insert_record(&data).unwrap();
@@ -876,7 +877,7 @@ mod test {
 
    #[test]
     fn update_with_redirect_back_to_root_dirties_both() {
-        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let bm = MockBufferManager::new(PAGE_SIZE);
         let testee = SlottedPageSegment::new(bm.clone(), 1, 0);
         let data = vec![10u8; PAGE_SIZE - 2000];
         let tid1 = testee.insert_record(&data).unwrap();
@@ -894,7 +895,7 @@ mod test {
 
     #[test]
     fn update_with_relocate_on_redirect_page() {
-        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let bm = MockBufferManager::new(PAGE_SIZE);
         let testee = SlottedPageSegment::new(bm, 1, 0);
         let data = vec![10u8; PAGE_SIZE - 2000];
         testee.insert_record(&data).unwrap();
@@ -917,7 +918,7 @@ mod test {
 
     #[test]
     fn update_with_relocate_on_redirect_page_dirties_only_relocate_page() {
-        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let bm = MockBufferManager::new(PAGE_SIZE);
         let testee = SlottedPageSegment::new(bm.clone(), 1, 0);
         let data = vec![10u8; PAGE_SIZE - 2000];
         testee.insert_record(&data).unwrap();
@@ -934,7 +935,7 @@ mod test {
 
     #[test]
     fn update_with_relocate_from_redirect_to_different_redirect() {
-        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let bm = MockBufferManager::new(PAGE_SIZE);
         let testee = SlottedPageSegment::new(bm, 1, 0);
         let data = vec![10u8; PAGE_SIZE - 2000];
         testee.insert_record(&data).unwrap();
@@ -956,7 +957,7 @@ mod test {
 
     #[test]
     fn update_with_relocate_from_redirect_to_different_redirect_dirties_all_three() {
-        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let bm = MockBufferManager::new(PAGE_SIZE);
         let testee = SlottedPageSegment::new(bm.clone(), 1, 0);
         let data = vec![10u8; PAGE_SIZE - 2000];
         testee.insert_record(&data).unwrap();
@@ -982,7 +983,7 @@ mod test {
         let datadir_path = datadir.into_path();
         let disk_manager = DiskManager::new(datadir_path.clone());
         let replacer = ClockReplacer::new();
-        let bm = Arc::new(HashTableBufferManager::new(disk_manager, replacer, PAGE_SIZE));
+        let bm = HashTableBufferManager::new(disk_manager, replacer, PAGE_SIZE);
         let testee = SlottedPageSegment::new(bm, 1, 0);
         let data = vec![10u8; PAGE_SIZE - 2000];
         testee.insert_record(&data).unwrap();
@@ -998,7 +999,7 @@ mod test {
 
         let disk_manager = DiskManager::new(datadir_path);
         let replacer = ClockReplacer::new();
-        let bm = Arc::new(HashTableBufferManager::new(disk_manager, replacer, PAGE_SIZE));
+        let bm = HashTableBufferManager::new(disk_manager, replacer, PAGE_SIZE);
         let testee = SlottedPageSegment::new(bm, 1, 0);
 
         let record = testee.get_record(tid, |record| {Vec::from(record)}).unwrap();
@@ -1010,7 +1011,7 @@ mod test {
 
     #[test]
     fn test_scan() {
-        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let bm = MockBufferManager::new(PAGE_SIZE);
         let testee = SlottedPageSegment::new(bm, 1, 0);
         let records = vec![
             vec![10u8; PAGE_SIZE - 2000],
@@ -1034,7 +1035,7 @@ mod test {
 
     #[test]
     fn test_scan_with_relocates() {
-        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let bm = MockBufferManager::new(PAGE_SIZE);
         let testee = SlottedPageSegment::new(bm.clone(), 1, 0);
         let records = vec![
             vec![10u8; PAGE_SIZE - 2000],
@@ -1060,7 +1061,7 @@ mod test {
 
     #[test]
     fn test_empty_scan() {
-        let bm = Arc::new(MockBufferManager::new(PAGE_SIZE));
+        let bm = MockBufferManager::new(PAGE_SIZE);
         let testee = SlottedPageSegment::new(bm, 1, 0);
 
         let mut scan = testee.scan(|record| Some(Vec::from(record)));

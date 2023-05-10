@@ -15,15 +15,15 @@ use super::disk::StorageManager;
 use super::page::{PageId, PAGE_SIZE, SegmentId};
 use super::replacer::Replacer;
 
-pub struct BMArc<'a, B: BufferManager> {
+pub struct BMArc<B: BufferManager> {
     page: Arc<RwLock<Page>>,
     page_id: PageId,
-    buffer_manager: &'a B,
-    unfix: Box<dyn Fn(&'a B, PageId, &PageType)>
+    buffer_manager: B,
+    unfix: Box<dyn Fn(&B, PageId, &PageType)>
 }
 
-impl<'a, B: BufferManager> BMArc<'a, B> {
-    pub fn new(page: Arc<RwLock<Page>>, page_id: PageId, buffer_manager: &'a B, unfix: Box<dyn Fn(&'a B, PageId, &PageType)>) -> BMArc<'a, B> {
+impl<'a, B: BufferManager> BMArc<B> {
+    pub fn new(page: Arc<RwLock<Page>>, page_id: PageId, buffer_manager: B, unfix: Box<dyn Fn(&B, PageId, &PageType)>) -> BMArc<B> {
         BMArc {
             page,
             page_id,
@@ -45,7 +45,7 @@ impl<'a, B: BufferManager> BMArc<'a, B> {
     
 }
 
-impl<'a, B: BufferManager> Deref for BMArc<'a, B> {
+impl<'a, B: BufferManager> Deref for BMArc<B> {
     type Target = RwLock<Page>;
 
     fn deref(&self) -> &Self::Target {
@@ -53,9 +53,9 @@ impl<'a, B: BufferManager> Deref for BMArc<'a, B> {
     }
 }
 
-impl<'a, B: BufferManager> Drop for BMArc<'a, B> {
+impl<'a, B: BufferManager> Drop for BMArc<B> {
     fn drop(&mut self) {
-        (self.unfix)(self.buffer_manager, self.page_id, &self.page);
+        (self.unfix)(&self.buffer_manager, self.page_id, &self.page);
     }
 }
 
@@ -140,8 +140,10 @@ impl PageTableBucket {
           based buffer manager.
  */
 
-pub trait BufferManager: Sync + Send + Sized {
-    fn fix_page<'a>(&'a self, page_id: PageId) -> Result<BMArc<'a, Self>, BufferManagerError>;
+// We require Static lifetime here. Maybe something less strict would be enough later
+pub trait BufferManager: Sync + Send + Sized + Clone + 'static { 
+    type Error;
+    fn fix_page<'a>(&'a self, page_id: PageId) -> Result<BMArc<Self>, BufferManagerError>;
     fn flush(&self) -> Result<(), BufferManagerError>;
     fn segment_size(&self, segment_id: SegmentId) -> usize;
 }
@@ -193,19 +195,19 @@ fn new_buffer_frame(size: usize) -> Box<[u8]> {
 }
 
 impl<R: Replacer + Send, S: StorageManager> HashTableBufferManager<R, S> {
-    pub fn new(disk_manager: S, replacer: R, size: usize) -> HashTableBufferManager<R, S> {
+    pub fn new(disk_manager: S, replacer: R, size: usize) -> Arc<HashTableBufferManager<R, S>> {
         let mut pagetable = PageTableType::with_capacity(size * 2);
         for _ in 0..size * 2 {
             pagetable.push(Mutex::new(PageTableBucket::new()));
         }
-        return HashTableBufferManager {
+        Arc::new(HashTableBufferManager {
             pagetable,
             pagetable_size: AtomicUsize::new(0),
             disk_manager,
             replacer: Mutex::new(replacer),
             size,
             segment_sizes: RwLock::new(BTreeMap::new()),
-        };
+        })
     }
 
     fn get_pagetable_index(&self, page_id: PageId) -> usize {
@@ -297,25 +299,6 @@ impl<R: Replacer + Send, S: StorageManager> HashTableBufferManager<R, S> {
                             .flatten()
                             .collect()
     }
-}
-
-impl<R: Replacer + Send, S: StorageManager> BufferManager for HashTableBufferManager<R,S> {
-    fn fix_page<'a>(&'a self, page_id: PageId) -> Result<BMArc<'a, Self>, BufferManagerError> {
-        let page_bucket = self.pagetable[self.get_pagetable_index(page_id)].lock();
-        let page = if let Some(result) = page_bucket.get(page_id) {
-            drop(page_bucket);
-            result.clone()
-        } else {
-            self.load(page_id, page_bucket)?
-        };
-        Ok(BMArc::new(page, page_id, &self, Box::new(
-            #[inline(always)]
-            |bm, page_id, _| {
-                // unfix
-                let mut replacer = bm.replacer.lock();
-                replacer.use_page(page_id);
-        })))
-    }
 
     fn flush(&self) -> Result<(), BufferManagerError> {
         for bucket in &self.pagetable {
@@ -328,6 +311,30 @@ impl<R: Replacer + Send, S: StorageManager> BufferManager for HashTableBufferMan
             }
         }
         Ok(())
+    }
+}
+
+impl<R: Replacer + Send + 'static, S: StorageManager + 'static> BufferManager for Arc<HashTableBufferManager<R,S>> {
+    type Error = BufferManagerError;
+    fn fix_page<'a>(&'a self, page_id: PageId) -> Result<BMArc<Self>, BufferManagerError> {
+        let page_bucket = self.pagetable[self.get_pagetable_index(page_id)].lock();
+        let page = if let Some(result) = page_bucket.get(page_id) {
+            drop(page_bucket);
+            result.clone()
+        } else {
+            self.load(page_id, page_bucket)?
+        };
+        Ok(BMArc::new(page, page_id, self.clone(), Box::new(
+            #[inline(always)]
+            |bm, page_id, _| {
+                // unfix
+                let mut replacer = bm.replacer.lock();
+                replacer.use_page(page_id);
+        })))
+    }
+
+    fn flush(&self) -> Result<(), BufferManagerError> {
+        HashTableBufferManager::flush(self)
     }
 
     fn segment_size(&self, segment_id: SegmentId) -> usize {
@@ -364,16 +371,17 @@ pub mod mock {
     }
 
     impl MockBufferManager {
-        pub fn new(page_size: usize) -> MockBufferManager {
-            MockBufferManager {
+        pub fn new(page_size: usize) -> Arc<MockBufferManager> {
+            Arc::new(MockBufferManager {
                 segments: Mutex::new(HashMap::new()),
                 page_size
-            }
+            })
         }
     }
 
-    impl BufferManager for MockBufferManager {
-        fn fix_page<'a>(&'a self, page_id: PageId) -> Result<BMArc<'a, Self>, super::BufferManagerError> {
+    impl BufferManager for Arc<MockBufferManager> {
+        type Error = super::BufferManagerError;
+        fn fix_page<'a>(&'a self, page_id: PageId) -> Result<BMArc<Self>, super::BufferManagerError> {
             let mut segments = self.segments.lock();
             let page = segments
                 .get(&page_id.segment_id)
@@ -391,7 +399,7 @@ pub mod mock {
                 segments.get_mut(&page_id.segment_id).unwrap().insert(page_id.offset_id, new_page);
                 segments[&page_id.segment_id][&page_id.offset_id].clone()
             };
-            Ok(BMArc::new(page, page_id, &self, Box::new(|_, _, _| {})))
+            Ok(BMArc::new(page, page_id, self.clone(), Box::new(|_, _, _| {})))
         }
 
         fn flush(&self) -> Result<(), super::BufferManagerError> {

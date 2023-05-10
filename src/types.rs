@@ -45,7 +45,7 @@ impl TupleValueType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Hash)]
 pub enum TupleValue {
     BigInt(i64),
     Int(i32),
@@ -82,6 +82,46 @@ impl TupleValue {
         match self {
             TupleValue::String(value) => value,
             _ => unreachable!(),
+        }
+    }
+}
+
+impl PartialEq for TupleValue {
+    fn eq(&self, other: &Self) -> bool {
+        // For numeric types also allow comparisons between different types (like bigint with smallint)
+        match (self, other) {
+            (TupleValue::BigInt(a), TupleValue::BigInt(b)) => a == b,
+            (TupleValue::Int(a), TupleValue::Int(b)) => a == b,
+            (TupleValue::SmallInt(a), TupleValue::SmallInt(b)) => a == b,
+            (TupleValue::String(a), TupleValue::String(b)) => a == b,
+            (TupleValue::BigInt(a), TupleValue::Int(b)) => *a == *b as i64,
+            (TupleValue::BigInt(a), TupleValue::SmallInt(b)) => *a == *b as i64,
+            (TupleValue::Int(a), TupleValue::BigInt(b)) => *a as i64 == *b,
+            (TupleValue::Int(a), TupleValue::SmallInt(b)) => *a == *b as i32,
+            (TupleValue::SmallInt(a), TupleValue::BigInt(b)) => *a as i64 == *b,
+            (TupleValue::SmallInt(a), TupleValue::Int(b)) => *a as i32 == *b,
+            _ => false
+        }
+    }
+}
+
+impl Eq for TupleValue {}
+
+impl PartialOrd for TupleValue {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        // For numeric types also allow comparisons between different types (like bigint with smallint)
+        match (self, other) {
+            (TupleValue::BigInt(a), TupleValue::BigInt(b)) => a.partial_cmp(b),
+            (TupleValue::Int(a), TupleValue::Int(b)) => a.partial_cmp(b),
+            (TupleValue::SmallInt(a), TupleValue::SmallInt(b)) => a.partial_cmp(b),
+            (TupleValue::String(a), TupleValue::String(b)) => a.partial_cmp(b),
+            (TupleValue::BigInt(a), TupleValue::Int(b)) => a.partial_cmp(&(*b as i64)),
+            (TupleValue::BigInt(a), TupleValue::SmallInt(b)) => a.partial_cmp(&(*b as i64)),
+            (TupleValue::Int(a), TupleValue::BigInt(b)) => (*a as i64).partial_cmp(b),
+            (TupleValue::Int(a), TupleValue::SmallInt(b)) => a.partial_cmp(&(*b as i32)),
+            (TupleValue::SmallInt(a), TupleValue::BigInt(b)) => (*a as i64).partial_cmp(b),
+            (TupleValue::SmallInt(a), TupleValue::Int(b)) => (*a as i32).partial_cmp(b),
+            _ => None
         }
     }
 }
