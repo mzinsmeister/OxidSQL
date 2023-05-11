@@ -28,7 +28,7 @@ pub type IURef = usize; // index of child operator's output
          table: TableDesc,
      },
      Selection {
-         predicate: BinaryOperation,
+         predicate: BooleanExpression,
          input: Box<PhysicalQueryPlanOperator>,
      },
      Projection {
@@ -54,43 +54,19 @@ pub type IURef = usize; // index of child operator's output
         writeln: Box<dyn FnMut(&str)>,
     }
  }
- 
- pub enum Expression {
-     Column(IURef),
-     Literal(TupleValue),
-     BinaryOp(BinaryOperation),
-     UnaryOp(UnaryOperation),
- }
 
- pub struct BinaryOperation {
-    pub op: BinaryOperator,
-    pub left: Box<Expression>,
-    pub right: Box<Expression>,
- }
+pub enum BooleanExpression {
+    And(Box<BooleanExpression>, Box<BooleanExpression>),
+    //Or(Box<BooleanExpression>, Box<BooleanExpression>),
+    //Not(Box<BooleanExpression>),
+    Eq(ArithmeticExpression, ArithmeticExpression)
+}
 
- pub struct UnaryOperation {
-    pub op: UnaryOperator,
-    pub expr: Box<Expression>,
- }
- 
- pub enum BinaryOperator {
-     /*Add,
-     Sub,
-     Mul,
-     Div,*/
-     Eq,
-     Neq,
-     /*Lt,
-     Lte,
-     Gt,
-     Gte,*/
-     And,
-     // Or, // OR is a PITA. We're saving this fun for later...
- }
- 
- pub enum UnaryOperator {
-     Not,
- }
+pub enum ArithmeticExpression{
+    Column(IURef),
+    Literal(TupleValue),
+    // Add, Sub, Mul, ...
+}
  
  pub struct PhysicalQueryPlan {
      pub root_operator: PhysicalQueryPlanOperator,

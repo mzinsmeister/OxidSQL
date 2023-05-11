@@ -2,7 +2,7 @@ use std::{cell::RefCell, rc::Rc};
 
 use crate::{catalog::TableDesc, access::{SlottedPageScan, SlottedPageSegment, tuple::Tuple}, storage::buffer_manager::{BufferManager, self, BufferManagerError}, types::{TupleValueType, TupleValue}};
 
-use super::plan::{PhysicalQueryPlan, PhysicalQueryPlanOperator, BinaryOperator, UnaryOperator, Expression, BinaryOperation};
+use super::plan::{PhysicalQueryPlan, PhysicalQueryPlanOperator, BooleanExpression, ArithmeticExpression};
 
 
 trait ExecutionEngine<B: BufferManager> {
@@ -58,62 +58,46 @@ impl<'a, B: BufferManager, F: FnMut(&[u8]) -> Option<Tuple>> VolcanoStyleEngineO
     }
 }
 
-enum VolcanoStyleExpression {
-    Value(Register),
-    BinaryOperation(VolcanoStyleBinaryExpression),
-    UnaryOperation(VolcanoStyleUnaryExpression)
+pub enum VolcanoStyleArithmeticExpression {
+    Value(Register)
 }
 
-impl VolcanoStyleExpression {
-    fn evaluate(&self) -> TupleValue {
+impl VolcanoStyleArithmeticExpression {
+    fn evaluate(&self) -> Option<TupleValue> {
         match self {
-            VolcanoStyleExpression::Value(register) => register.borrow().as_ref().unwrap().clone(),
-            VolcanoStyleExpression::BinaryOperation(op) => op.evaluate(),
-            VolcanoStyleExpression::UnaryOperation(op) => op.evaluate()
+            VolcanoStyleArithmeticExpression::Value(v) => v.borrow().to_owned(),
         }
     }
 }
 
-struct VolcanoStyleBinaryExpression {
-    left: Box<VolcanoStyleExpression>,
-    right: Box<VolcanoStyleExpression>,
-    op: BinaryOperator
+pub enum VolcanoStyleEngineBooleanExpression {
+    And(Box<VolcanoStyleEngineBooleanExpression>, Box<VolcanoStyleEngineBooleanExpression>),
+    //Or(Box<VolcanoStyleEngineBooleanExpression>, Box<VolcanoStyleEngineBooleanExpression>),
+    Eq(VolcanoStyleArithmeticExpression, VolcanoStyleArithmeticExpression)
 }
 
-impl VolcanoStyleBinaryExpression {
-    fn evaluate(&self) -> TupleValue {
-        let left = self.left.evaluate();
-        let right = self.right.evaluate();
-        // We assume our analyzer made sure the data types match up
-        match self.op {
-            BinaryOperator::Eq => TupleValue::Bool(left == right),
-            BinaryOperator::Neq => TupleValue::Bool(left != right),
-            BinaryOperator::And => TupleValue::Bool(left.as_bool() && right.as_bool()),
-        }
-    }
-}
-
-struct VolcanoStyleUnaryExpression {
-    child: Box<VolcanoStyleExpression>,
-    operator: UnaryOperator
-}
-
-impl VolcanoStyleUnaryExpression {
-    fn evaluate(&self) -> TupleValue {
-        let child = self.child.evaluate();
-        match self.operator {
-            UnaryOperator::Not => TupleValue::Bool(!child.as_bool()),
+impl VolcanoStyleEngineBooleanExpression {
+    fn evaluate(&self) -> bool {
+        match self {
+            VolcanoStyleEngineBooleanExpression::And
+                (left, right) => {
+                    left.evaluate() && right.evaluate()
+                },
+            VolcanoStyleEngineBooleanExpression::Eq
+                (left, right) => {
+                    left.evaluate() == right.evaluate()
+                },
         }
     }
 }
 
 struct VolcanoStyleEngineSelection {
     child: Box<dyn VolcanoStyleEngineOperator>,
-    predicate: VolcanoStyleBinaryExpression
+    predicate: VolcanoStyleEngineBooleanExpression
 }
 
 impl VolcanoStyleEngineSelection {
-    fn new(child: Box<dyn VolcanoStyleEngineOperator>, predicate: VolcanoStyleBinaryExpression) -> Self {
+    fn new(child: Box<dyn VolcanoStyleEngineOperator>, predicate: VolcanoStyleEngineBooleanExpression) -> Self {
         VolcanoStyleEngineSelection {
             child,
             predicate
@@ -124,7 +108,7 @@ impl VolcanoStyleEngineSelection {
 impl VolcanoStyleEngineOperator for VolcanoStyleEngineSelection {
     fn next(&mut self) -> Result<bool, BufferManagerError> {
         while self.child.next()? {
-            if self.predicate.evaluate().as_bool() {
+            if self.predicate.evaluate() {
                 return Ok(true);
             }
         }
@@ -184,29 +168,25 @@ impl VolcanoStyleEngine {
         VolcanoStyleEngine
     }
 
-    fn convert_predicate_to_volcano_style_expression(op: BinaryOperation, input_registers: &[Register]) -> VolcanoStyleBinaryExpression {
-        let left = Self::convert_expression_to_volcano_style_expression(*op.left, input_registers);
-        let right = Self::convert_expression_to_volcano_style_expression(*op.right, input_registers);
-        VolcanoStyleBinaryExpression {
-            left: Box::new(left),
-            right: Box::new(right),
-            op: op.op
+    fn convert_predicate_to_volcano_style(op: BooleanExpression, input_registers: &[Register]) -> VolcanoStyleEngineBooleanExpression {
+        match op {
+            BooleanExpression::And(left, right) => {
+                let left_conv = VolcanoStyleEngine::convert_predicate_to_volcano_style(*left, input_registers);
+                let right_conv = VolcanoStyleEngine::convert_predicate_to_volcano_style(*right, input_registers);
+                VolcanoStyleEngineBooleanExpression::And(Box::new(left_conv), Box::new(right_conv))
+            },
+            BooleanExpression::Eq(left, right) => {
+                let left_conv = VolcanoStyleEngine::convert_arith_expression_to_volcano_style(left, input_registers);
+                let right_conv = VolcanoStyleEngine::convert_arith_expression_to_volcano_style(right, input_registers);
+                VolcanoStyleEngineBooleanExpression::Eq(left_conv, right_conv)
+            },
         }
     }
 
-    fn convert_expression_to_volcano_style_expression(expression: Expression, input_registers: &[Register]) -> VolcanoStyleExpression {
+    fn convert_arith_expression_to_volcano_style(expression: ArithmeticExpression, input_registers: &[Register]) -> VolcanoStyleArithmeticExpression {
         match expression {
-            Expression::Column(iu_ref) => VolcanoStyleExpression::Value(input_registers[iu_ref].clone()),
-            Expression::Literal(value) => VolcanoStyleExpression::Value(Rc::new(RefCell::new(Some(value)))),
-            Expression::BinaryOp(op) => 
-                VolcanoStyleExpression::BinaryOperation(Self::convert_predicate_to_volcano_style_expression(op, input_registers)),
-            Expression::UnaryOp(op) => {
-                let child = Self::convert_expression_to_volcano_style_expression(*op.expr, input_registers);
-                VolcanoStyleExpression::UnaryOperation(VolcanoStyleUnaryExpression {
-                    child: Box::new(child),
-                    operator: op.op
-                })
-            }
+            ArithmeticExpression::Column(c) => VolcanoStyleArithmeticExpression::Value(input_registers[c].clone()),
+            ArithmeticExpression::Literal(value) => VolcanoStyleArithmeticExpression::Value(Rc::new(RefCell::new(Some(value)))),
         }
     }
 
@@ -222,7 +202,7 @@ impl VolcanoStyleEngine {
             },
             PhysicalQueryPlanOperator::Selection { predicate, input } => {
                 let child = Self::convert_physical_plan_to_volcano_plan(buffer_manager, *input);
-                let predicate = Self::convert_predicate_to_volcano_style_expression(predicate, child.get_output());
+                let predicate = Self::convert_predicate_to_volcano_style(predicate, child.get_output());
                 Box::new(VolcanoStyleEngineSelection::new(child, predicate))
             },
             _ => unimplemented!()
@@ -282,9 +262,9 @@ mod mock {
 mod test {
     use std::{rc::Rc, cell::RefCell};
 
-    use crate::{storage::{buffer_manager::mock::MockBufferManager, page::PAGE_SIZE}, access::{SlottedPageSegment, tuple::Tuple}, types::{TupleValue, TupleValueType}, execution::plan::{PhysicalQueryPlan, PhysicalQueryPlanOperator, BinaryOperator}, catalog::{AttributeDesc, TableDesc}};
+    use crate::{storage::{buffer_manager::mock::MockBufferManager, page::PAGE_SIZE}, access::{SlottedPageSegment, tuple::Tuple}, types::{TupleValue, TupleValueType}, execution::{plan::{PhysicalQueryPlan, PhysicalQueryPlanOperator}, engine::VolcanoStyleArithmeticExpression}, catalog::{AttributeDesc, TableDesc}};
 
-    use super::{ExecutionEngine, VolcanoStyleEngineOperator, VolcanoStyleEnginePrint, mock::MockVolcanoSourceOperator, VolcanoStyleEngineTableScan, new_scan, VolcanoStyleEngineSelection, VolcanoStyleExpression}; 
+    use super::{ExecutionEngine, VolcanoStyleEngineOperator, VolcanoStyleEnginePrint, mock::MockVolcanoSourceOperator, new_scan, VolcanoStyleEngineSelection}; 
 
     fn get_testtable_desc() -> TableDesc {
         TableDesc {
@@ -330,26 +310,39 @@ mod test {
             }
         }
     }
-
     #[test]
     // TODO: Test selection way more. Also test predicate evaluation separately
-    fn test_selection() {
+    fn test_basic_eq_selection() {
         let tuples = vec![
             Tuple::new(vec![Some(TupleValue::Int(1)), Some(TupleValue::String("a".to_string()))]),
             Tuple::new(vec![Some(TupleValue::Int(2)), Some(TupleValue::String("b".to_string()))]),
             Tuple::new(vec![Some(TupleValue::Int(3)), Some(TupleValue::String("c".to_string()))]),
         ];
-        let mut lines: Vec<String> = Vec::new();
         let mock_source = MockVolcanoSourceOperator::new(tuples.into());
-        let predicate = super::VolcanoStyleBinaryExpression { 
-            left: Box::new(VolcanoStyleExpression::Value(mock_source.get_output()[0].clone())), 
-            right: Box::new(VolcanoStyleExpression::Value(Rc::new(RefCell::new(Some(TupleValue::Int(2)))))), 
-            op: BinaryOperator::Eq
-        };
+        let predicate = super::VolcanoStyleEngineBooleanExpression::Eq(
+            VolcanoStyleArithmeticExpression::Value(mock_source.get_output()[0].clone()), 
+            VolcanoStyleArithmeticExpression::Value(Rc::new(RefCell::new(Some(TupleValue::Int(2))))), 
+        );
         let mut operator = VolcanoStyleEngineSelection::new(Box::new(mock_source), predicate);
         assert!(operator.next().unwrap());
         assert_eq!((*operator.get_output()[0]).to_owned().into_inner(), Some(TupleValue::Int(2)));
         assert_eq!((*operator.get_output()[1]).to_owned().into_inner(), Some(TupleValue::String("b".to_string())));
+        assert!(!operator.next().unwrap());
+    }
+
+    #[test]
+    fn test_empty_selection() {
+        let tuples = vec![
+            Tuple::new(vec![Some(TupleValue::Int(1)), Some(TupleValue::String("a".to_string()))]),
+            Tuple::new(vec![Some(TupleValue::Int(2)), Some(TupleValue::String("b".to_string()))]),
+            Tuple::new(vec![Some(TupleValue::Int(3)), Some(TupleValue::String("c".to_string()))]),
+        ];
+        let mock_source = MockVolcanoSourceOperator::new(tuples.into());
+        let predicate = super::VolcanoStyleEngineBooleanExpression::Eq(
+            VolcanoStyleArithmeticExpression::Value(Rc::new(RefCell::new(Some(TupleValue::Int(1))))), 
+            VolcanoStyleArithmeticExpression::Value(Rc::new(RefCell::new(Some(TupleValue::Int(2))))), 
+        );
+        let mut operator = VolcanoStyleEngineSelection::new(Box::new(mock_source), predicate);
         assert!(!operator.next().unwrap());
     }
 

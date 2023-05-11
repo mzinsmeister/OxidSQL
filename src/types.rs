@@ -52,7 +52,7 @@ pub enum TupleValue {
     SmallInt(i16),
     String(String),
     // Float(f64),
-    Bool(bool),
+    // Bool(bool),
     // Null,
 }
 
@@ -84,13 +84,6 @@ impl TupleValue {
             _ => unreachable!(),
         }
     }
-
-    pub fn as_bool(&self) -> bool {
-        match self {
-            TupleValue::Bool(value) => *value,
-            _ => unreachable!(),
-        }
-    }
 }
 
 impl PartialEq for TupleValue {
@@ -107,7 +100,6 @@ impl PartialEq for TupleValue {
             (TupleValue::Int(a), TupleValue::SmallInt(b)) => *a == *b as i32,
             (TupleValue::SmallInt(a), TupleValue::BigInt(b)) => *a as i64 == *b,
             (TupleValue::SmallInt(a), TupleValue::Int(b)) => *a as i32 == *b,
-            (TupleValue::Bool(a), TupleValue::Bool(b)) => a == b,
             _ => false
         }
     }
