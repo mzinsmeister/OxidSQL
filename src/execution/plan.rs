@@ -28,7 +28,7 @@ pub type IURef = usize; // index of child operator's output
          table: TableDesc,
      },
      Selection {
-         predicate: Expression,
+         predicate: BinaryOperation,
          input: Box<PhysicalQueryPlanOperator>,
      },
      Projection {
@@ -58,25 +58,29 @@ pub type IURef = usize; // index of child operator's output
  pub enum Expression {
      Column(IURef),
      Literal(TupleValue),
-     BinaryOp {
-         op: BinaryOperator,
-         left: Box<Expression>,
-         right: Box<Expression>,
-     },
-     UnaryOp {
-         op: UnaryOperator,
-         expr: Box<Expression>,
-     },
+     BinaryOp(BinaryOperation),
+     UnaryOp(UnaryOperation),
+ }
+
+ pub struct BinaryOperation {
+    pub op: BinaryOperator,
+    pub left: Box<Expression>,
+    pub right: Box<Expression>,
+ }
+
+ pub struct UnaryOperation {
+    pub op: UnaryOperator,
+    pub expr: Box<Expression>,
  }
  
  pub enum BinaryOperator {
-     Add,
+     /*Add,
      Sub,
      Mul,
-     Div,
+     Div,*/
      Eq,
-     /*Neq,
-     Lt,
+     Neq,
+     /*Lt,
      Lte,
      Gt,
      Gte,*/

@@ -89,6 +89,7 @@ impl Tuple {
                     TupleValue::SmallInt(_) => {
                         length += 2;
                     },
+                    _ => panic!("Cannot write data {:#?} at the moment", value)
                 }
             }
         }
@@ -119,6 +120,7 @@ impl Tuple {
                     TupleValue::SmallInt(value) => {
                         cursor.write_i16::<BigEndian>(*value).unwrap();
                     },
+                    _ => panic!("Cannot write data {:#?} at the moment", value)
                 }
             } else {
                 let null_byte = &mut null_bytes[i / 8];
