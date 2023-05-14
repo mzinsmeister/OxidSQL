@@ -16,6 +16,13 @@ pub struct BoundTable {
 }
 
 impl BoundTable {
+    pub fn new(table: TableDesc, binding: Option<String>) -> Self {
+        Self {
+            table,
+            binding
+        }
+    }
+
     pub fn to_ref(&self) -> BoundTableRef {
         BoundTableRef {
             table_ref: self.table.id,

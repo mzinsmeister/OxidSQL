@@ -28,7 +28,7 @@ pub struct ColumnRef {
 const DB_OBJECT_CATALOG_SEGMENT_ID: u16 = 0;
 const ATTRIBUTE_CATALOG_SEGMENT_ID: u16 = 2;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TableDesc {
     pub id: u32,
     pub name: String,

@@ -10,6 +10,8 @@
     plan-dag function.
  */
 
+use std::fmt::Debug;
+
 use crate::{types::TupleValue, catalog::TableDesc};
 
 pub type IURef = usize; // index of child operator's output
@@ -23,7 +25,7 @@ pub type IURef = usize; // index of child operator's output
  // choose to use a tuple-at-a-time or a vector-at-a-time model. The plan consisting
  // of PhysicalQueryPlanOperators will just be a contract/api for the execution engine.
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
  pub enum PhysicalQueryPlanOperator {
      Tablescan {
          table: TableDesc,
@@ -55,7 +57,7 @@ pub type IURef = usize; // index of child operator's output
     }
  }
 
-pub trait TupleWriter {
+pub trait TupleWriter: Debug {
     fn write_tuple(&mut self, tuple: Vec<Option<TupleValue>>);
     fn clone_box(&self) -> Box<dyn TupleWriter>;
 }
@@ -66,7 +68,7 @@ impl Clone for Box<dyn TupleWriter> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct StdOutTupleWriter {
     attribute_names: Vec<String>,
     header_written: bool,
@@ -95,7 +97,7 @@ impl TupleWriter for StdOutTupleWriter {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BooleanExpression {
     And(Box<BooleanExpression>, Box<BooleanExpression>),
     //Or(Box<BooleanExpression>, Box<BooleanExpression>),
@@ -103,7 +105,7 @@ pub enum BooleanExpression {
     Eq(ArithmeticExpression, ArithmeticExpression)
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArithmeticExpression{
     Column(IURef),
     Literal(TupleValue),
@@ -130,7 +132,7 @@ pub enum ArithmeticExpression{
     use super::TupleWriter;
 
 
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     pub struct MockTupleWriter {
         pub tuples: Rc<RefCell<Vec<Tuple>>>,
     }
