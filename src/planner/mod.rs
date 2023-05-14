@@ -3,22 +3,82 @@
           by applying rewrite rules and possibly using optimization techniques implemented in
           the optimizer module.
  */
+mod bottomup;
 
+use std::{collections::BTreeMap};
+
+use crate::{catalog::{AttributeDesc, TableDesc}, types::TupleValue, execution::plan::PhysicalQueryPlan};
+
+#[derive(Clone)]
+pub struct BoundTable {
+    pub table: TableDesc,
+    pub binding: Option<String>
+}
+
+impl BoundTable {
+    pub fn to_ref(&self) -> BoundTableRef {
+        BoundTableRef {
+            table_ref: self.table.id,
+            binding: self.binding.clone()
+        }
+    }
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BoundTableRef {
+    pub table_ref: u32,
+    pub binding: Option<String>
+}
+
+#[derive(Clone)]
+pub struct BoundAttribute {
+    pub attribute: AttributeDesc,
+    pub binding: Option<String>
+}
+
+impl BoundAttribute {
+    pub fn to_ref(&self) -> BoundAttributeRef {
+        BoundAttributeRef {
+            attribute_ref: self.attribute.id,
+            table_ref: self.attribute.table_ref,
+            binding: self.binding.clone()
+        }
+    }
+
+    pub fn get_table_ref(&self) -> BoundTableRef {
+        BoundTableRef {
+            table_ref: self.attribute.table_ref,
+            binding: self.binding.clone()
+        }
+    }
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BoundAttributeRef {
+    pub attribute_ref: u32,
+    pub table_ref: u32,
+    pub binding: Option<String>
+}
+
+impl BoundAttributeRef {
+    pub fn get_table_ref(&self) -> BoundTableRef {
+        BoundTableRef {
+            table_ref: self.table_ref,
+            binding: self.binding.clone()
+        }
+    }
+}
+
+pub struct Query {
+    pub select: Vec<BoundAttribute>,
+    pub from: BTreeMap<BoundTableRef, BoundTable>,
+    pub selections: Vec<(BoundAttribute, TupleValue)>,
+    pub join_predicates: Vec<(BoundAttribute, BoundAttribute)>,
+}
+
+pub trait Planner {
+    fn plan(&self, query: &Query) -> Result<PhysicalQueryPlan, PlannerError>;
+}
 
  pub enum PlannerError {}
  
- /*
- pub trait Planner {
-     fn plan(&self, query: &Query) -> Result<PhysicalPlan, PlannerError>;
- }
- 
- // Default Planner using the DPccp algorithm for optimization
- pub type DefaultPlanner = DPccpPlanner;
- 
- pub struct DPccpPlanner {}
- 
- impl Planner for DPccpPlanner {
-     fn plan(&self, query: &Query) -> Result<PhysicalPlan, PlannerError> {
-         unimplemented!()
-     }
- }*/

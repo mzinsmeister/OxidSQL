@@ -1,5 +1,5 @@
-mod query_graph;
-mod optimizer;
+pub mod query_graph;
+pub mod optimizer;
 
 /*
     TODO: Implement an optimizer that can take a query plan and produce an optimized plan by applying

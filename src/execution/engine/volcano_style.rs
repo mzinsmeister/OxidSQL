@@ -1,6 +1,6 @@
 use std::{cell::RefCell, rc::Rc, collections::HashMap};
 
-use crate::{catalog::TableDesc, access::{SlottedPageScan, SlottedPageSegment, tuple::Tuple}, storage::buffer_manager::{BufferManager, BufferManagerError}, types::{TupleValueType, TupleValue}, execution::plan::{self, PhysicalQueryPlanOperator, PhysicalQueryPlan}};
+use crate::{catalog::TableDesc, access::{SlottedPageScan, SlottedPageSegment, tuple::Tuple}, storage::buffer_manager::{BufferManager, BufferManagerError}, types::{TupleValueType, TupleValue}, execution::plan::{self, PhysicalQueryPlanOperator, PhysicalQueryPlan, TupleWriter}};
 
 use super::{ExecutionEngine};
 
@@ -216,35 +216,27 @@ impl Operator for HashJoin {
     }
 }
 
-struct Print<W: FnMut(&str)> {
-    header_printed: bool,
-    attribute_names: Vec<String>,
+struct Print {
     child: Box<dyn Operator>,
-    writer: W
+    tuple_writer: Box<dyn TupleWriter>
 }
 
-impl<W: FnMut(&str)> Print<W> {
-    fn new(child: Box<dyn Operator>, attribute_names: Vec<String>, writer: W) -> Self {
+impl Print {
+    fn new(child: Box<dyn Operator>, tuple_writer: Box<dyn TupleWriter>) -> Self {
         Print {
-            header_printed: false,
-            attribute_names,
             child,
-            writer
+            tuple_writer
         }
     }
 }
 
-impl<W: FnMut(&str)> Operator for Print<W> {
+impl Operator for Print {
     fn next(&mut self) -> Result<bool, BufferManagerError> {
-        if !self.header_printed {
-            self.header_printed = true;
-            (self.writer)(&self.attribute_names.join(" | "));
-        }
         if self.child.next()? {
             let elems = self.child.get_output().iter()
-                .map(|register| format!("{:?}", register.borrow().as_ref()))
-                .collect::<Vec<String>>();
-            (self.writer)(&elems.join(" | "));
+                .map(|register| register.borrow().clone())
+                .collect::<Vec<Option<TupleValue>>>();
+            self.tuple_writer.write_tuple(elems);
             Ok(true)
         } else {
             Ok(false)
@@ -292,9 +284,9 @@ impl Engine {
                 let segment = SlottedPageSegment::new(buffer_manager, table.segment_id, table.segment_id + 1);
                 Box::new(new_scan(segment, table))
             },
-            PhysicalQueryPlanOperator::Print { input, attribute_names, writeln } => {
+            PhysicalQueryPlanOperator::Print { input, tuple_writer } => {
                 let child = Self::convert_physical_plan_to_volcano_plan(buffer_manager, *input);
-                Box::new(Print::new(child, attribute_names, writeln))
+                Box::new(Print::new(child, tuple_writer))
             },
             PhysicalQueryPlanOperator::Selection { predicate, input } => {
                 let child = Self::convert_physical_plan_to_volcano_plan(buffer_manager, *input);
@@ -358,7 +350,7 @@ mod mock {
 mod test {
     use std::{rc::Rc, cell::RefCell};
 
-    use crate::{storage::{buffer_manager::mock::MockBufferManager, page::PAGE_SIZE}, access::{SlottedPageSegment, tuple::Tuple}, types::{TupleValue, TupleValueType}, execution::{plan::{PhysicalQueryPlan, PhysicalQueryPlanOperator}, engine::volcano_style::{Selection, ArithmeticExpression, Print}}, catalog::{AttributeDesc, TableDesc}};
+    use crate::{storage::{buffer_manager::mock::MockBufferManager, page::PAGE_SIZE}, access::{SlottedPageSegment, tuple::Tuple}, types::{TupleValue, TupleValueType}, execution::{plan::{PhysicalQueryPlan, PhysicalQueryPlanOperator, mock::MockTupleWriter}, engine::volcano_style::{Selection, ArithmeticExpression, Print}}, catalog::{AttributeDesc, TableDesc}};
 
     use super::{super::ExecutionEngine, Operator, mock::MockVolcanoSourceOperator, new_scan}; 
 
@@ -382,7 +374,8 @@ mod test {
                     table_ref: 0
                 }
             ],
-            segment_id: 0
+            segment_id: 0,
+            cardinality: 2,
         }
     }
 
@@ -510,16 +503,13 @@ mod test {
             Tuple::new(vec![Some(TupleValue::Int(2)), Some(TupleValue::String("b".to_string()))]),
             Tuple::new(vec![Some(TupleValue::Int(3)), Some(TupleValue::String("c".to_string()))]),
         ];
-        let mut lines: Vec<String> = Vec::new();
-        let mock_source = MockVolcanoSourceOperator::new(tuples.into());
-        let mut operator = Print::new(Box::new(mock_source), vec!["a".to_string(), "b".to_string()], Box::new(|s: &str| lines.push(s.to_string())));
+        let mock_source = MockVolcanoSourceOperator::new(tuples.clone().into());
+        let tuple_writer = MockTupleWriter::new();
+        let mut operator = Print::new(Box::new(mock_source), Box::new(tuple_writer.clone()));
         while operator.next().unwrap() {
             // Do nothing
         }
-        assert_eq!(lines.join("\n"), concat!("a | b\n",
-                                        "Some(Int(1)) | Some(String(\"a\"))\n",
-                                        "Some(Int(2)) | Some(String(\"b\"))\n",
-                                        "Some(Int(3)) | Some(String(\"c\"))"));
+        assert_eq!(tuple_writer.tuples.borrow().clone(), tuples);
     }
 
     #[test]
@@ -566,6 +556,7 @@ mod test {
         }
         let lines: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
         let lines2 = lines.clone();
+        let tuple_writer = MockTupleWriter::new();
         let root_operator = PhysicalQueryPlan::new(
             PhysicalQueryPlanOperator::Print {
                 input: Box::new(
@@ -573,16 +564,12 @@ mod test {
                         table: get_testtable_desc()
                     },
                 ),
-                attribute_names: vec![String::from("a"), String::from("b")],
-                writeln: Box::new(move |s: &str| lines2.borrow_mut().push(s.to_string())),
+                tuple_writer: Box::new(tuple_writer.clone())
             },
             200.0
         );
         let engine = super::Engine::new();
         engine.execute(root_operator, buffer_manager).unwrap();
-        assert_eq!(lines.borrow().join("\n"), concat!("a | b\n",
-                                            "Some(Int(1)) | Some(String(\"a\"))\n",
-                                            "Some(Int(2)) | Some(String(\"b\"))\n",
-                                            "Some(Int(3)) | Some(String(\"c\"))"));
+        assert_eq!(tuple_writer.tuples.borrow().clone(), tuples);
     }
 }

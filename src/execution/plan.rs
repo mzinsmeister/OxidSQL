@@ -23,6 +23,7 @@ pub type IURef = usize; // index of child operator's output
  // choose to use a tuple-at-a-time or a vector-at-a-time model. The plan consisting
  // of PhysicalQueryPlanOperators will just be a contract/api for the execution engine.
 
+#[derive(Clone)]
  pub enum PhysicalQueryPlanOperator {
      Tablescan {
          table: TableDesc,
@@ -50,11 +51,51 @@ pub type IURef = usize; // index of child operator's output
      // would be added later
      Print {
         input: Box<PhysicalQueryPlanOperator>,
-        attribute_names: Vec<String>,
-        writeln: Box<dyn FnMut(&str)>,
+        tuple_writer: Box<dyn TupleWriter>,
     }
  }
 
+pub trait TupleWriter {
+    fn write_tuple(&mut self, tuple: Vec<Option<TupleValue>>);
+    fn clone_box(&self) -> Box<dyn TupleWriter>;
+}
+
+impl Clone for Box<dyn TupleWriter> {
+    fn clone(&self) -> Self {
+        self.as_ref().clone_box()
+    }
+}
+
+#[derive(Clone)]
+pub struct StdOutTupleWriter {
+    attribute_names: Vec<String>,
+    header_written: bool,
+}
+
+impl StdOutTupleWriter {
+    pub fn new(attribute_names: Vec<String>) -> Self {
+        Self {
+            attribute_names,
+            header_written: false,
+        }
+    }
+}
+
+impl TupleWriter for StdOutTupleWriter {
+    fn write_tuple(&mut self, tuple: Vec<Option<TupleValue>>) {
+        if !self.header_written {
+            println!("{}", self.attribute_names.join(" | "));
+            self.header_written = true;
+        }
+        println!("{}", tuple.iter().map(|v| format!("{:#?}", v)).collect::<Vec<String>>().join(" | "));
+    }
+
+    fn clone_box(&self) -> Box<dyn TupleWriter> {
+        Box::new(self.clone())
+    }
+}
+
+#[derive(Clone)]
 pub enum BooleanExpression {
     And(Box<BooleanExpression>, Box<BooleanExpression>),
     //Or(Box<BooleanExpression>, Box<BooleanExpression>),
@@ -62,6 +103,7 @@ pub enum BooleanExpression {
     Eq(ArithmeticExpression, ArithmeticExpression)
 }
 
+#[derive(Clone)]
 pub enum ArithmeticExpression{
     Column(IURef),
     Literal(TupleValue),
@@ -77,4 +119,37 @@ pub enum ArithmeticExpression{
         pub fn new(root_operator: PhysicalQueryPlanOperator, cost: f64) -> Self {
             Self { root_operator, cost }
         }
+ }
+
+ #[cfg(test)]
+ pub mod mock {
+    use std::{cell::RefCell, rc::Rc};
+
+    use crate::{types::TupleValue, access::tuple::Tuple};
+
+    use super::TupleWriter;
+
+
+    #[derive(Clone)]
+    pub struct MockTupleWriter {
+        pub tuples: Rc<RefCell<Vec<Tuple>>>,
+    }
+
+    impl MockTupleWriter {
+        pub fn new() -> Self {
+            Self {
+                tuples: Rc::new(RefCell::new(Vec::new())),
+            }
+        }
+    }
+
+    impl TupleWriter for MockTupleWriter {
+        fn write_tuple(&mut self, tuple: Vec<Option<TupleValue>>) {
+            self.tuples.borrow_mut().push(Tuple::new(tuple.iter().map(|v| v.clone()).collect()));
+        }
+
+        fn clone_box(&self) -> Box<dyn TupleWriter> {
+            Box::new(self.clone())
+        }
+    }
  }

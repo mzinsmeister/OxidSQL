@@ -14,6 +14,7 @@ The benefit of this approach is that we don't have to store the values of null a
 The downside is that we have to parse the null bitmap before we can parse the actual values and that we don't have
 constant time access to the values (we have to parse the null bitmap first).
  */
+#[derive(Debug, PartialEq, Clone)]
 pub struct Tuple {
     pub values: Vec<Option<TupleValue>>
 }

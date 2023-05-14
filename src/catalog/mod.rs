@@ -1,4 +1,6 @@
-use std::{sync::Arc};
+use std::{sync::{Arc, Mutex, atomic::{Ordering, AtomicU64}}, collections::BTreeMap};
+
+use parking_lot::RwLock;
 
 use crate::{access::{SlottedPageSegment, tuple::Tuple}, storage::{buffer_manager::{BufferManager, BufferManagerError}, page::SegmentId}, types::{TupleValueType, TupleValue, RelationTID}};
 
@@ -26,40 +28,91 @@ pub struct ColumnRef {
 const DB_OBJECT_CATALOG_SEGMENT_ID: u16 = 0;
 const ATTRIBUTE_CATALOG_SEGMENT_ID: u16 = 2;
 
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone)]
 pub struct TableDesc {
     pub id: u32,
     pub name: String,
     pub attributes: Vec<AttributeDesc>,
-    pub segment_id: SegmentId
+    pub segment_id: SegmentId,
+    pub cardinality: u64
 }
 
+impl TableDesc {
+    pub fn get_attribute_by_name(&self, name: &str) -> Option<&AttributeDesc> {
+        self.attributes.iter().find(|a| a.name == name)
+    }
+
+    pub fn get_attribute_by_id(&self, id: u32) -> Option<&AttributeDesc> {
+        self.attributes.iter().find(|a| a.id == id)
+    }
+
+    pub fn get_attribute_index_by_id(&self, id: u32) -> Option<usize> {
+        self.attributes.iter().position(|a| a.id == id)
+    }
+}
+
+#[derive(Clone)]
 struct Catalog<B: BufferManager> {
     cache: Arc<CatalogCache<B>>,
 }
 
+
 struct CatalogCache<B:BufferManager> {
+    bm: B,
     db_object_segment: DbObjectCatalogSegment<B>,
-    attribute_segment: AttributeCatalogSegment<B>
+    attribute_segment: AttributeCatalogSegment<B>,
+    table_cache: RwLock<BTreeMap<u32, (TableDesc, AtomicU64)>>, // TODO: Fix this statistics hack
+    table_name_index: RwLock<BTreeMap<String, u32>>
     // TODO: Agressively Cache stuff here
 }
 
 impl<B: BufferManager> CatalogCache<B> {
     fn new(buffer_manager: B) -> CatalogCache<B> {
         CatalogCache {
+            bm: buffer_manager.clone(),
             db_object_segment: DbObjectCatalogSegment::new(buffer_manager.clone()),
-            attribute_segment: AttributeCatalogSegment::new(buffer_manager.clone())
+            attribute_segment: AttributeCatalogSegment::new(buffer_manager),
+            table_cache: RwLock::new(BTreeMap::new()),
+            table_name_index: RwLock::new(BTreeMap::new())
         }
     }
 
     fn find_table_by_name(&self, name: &str) -> Result<Option<TableDesc>, BufferManagerError> {
+        if let Some(table_id) = self.table_name_index.read().get(name) {
+            let (cached_table, cardinality) = &self.table_cache.read()[table_id];
+            let mut table = cached_table.clone();
+            table.cardinality = cardinality.load(Ordering::SeqCst);
+            return Ok(Some(table));
+        }
         let db_object = self.db_object_segment.find_db_object_by_name(DbObjectType::Relation, name);
         if let Some(db_object) = db_object {
             let attributes = self.attribute_segment.get_attributes_by_db_object(db_object.id);
-            Ok(Some(TableDesc { id: db_object.id, name: db_object.name, attributes, segment_id: db_object.segment_id }))
+            // TODO: Fix statistics hack so that you don't need to scan all tables on startup first
+            let slotted_page = SlottedPageSegment::new(self.bm.clone(), db_object.segment_id, db_object.segment_id + 1);
+            let cardinality = slotted_page.clone().scan(|data| { Some(()) }).count() as u64;
+            let table = TableDesc { id: db_object.id, name: db_object.name, attributes, segment_id: db_object.segment_id, cardinality: cardinality };
+            let mut table_name_cache = self.table_name_index.write();
+            let mut table_cache = self.table_cache.write();
+            if let Some(table) = table_cache.get(&table.id) {
+                let (cached_table, cardinality) = &self.table_cache.read()[&table.0.id];
+                let mut table = cached_table.clone();
+                table.cardinality = cardinality.load(Ordering::SeqCst);
+                return Ok(Some(table));
+            } else {
+                table_name_cache.insert(table.name.clone(), table.id);
+                table_cache.insert(table.id, (table.clone(), AtomicU64::new(cardinality)));
+                return Ok(Some(table));
+            }
         } else {
             Ok(None)
         }
+    }
+
+    fn change_table_cardinality(&self, table_id: u32, delta: u64) -> Result<(), BufferManagerError> {
+        let table_cache = self.table_cache.read();
+        let table = table_cache.get(&table_id).unwrap();
+        table.1.fetch_add(delta, Ordering::SeqCst);
+        Ok(())
     }
 }
 

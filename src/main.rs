@@ -7,6 +7,7 @@ mod util;
 mod storage;
 mod access;
 mod execution;
+mod statistics;
 mod optimizer;
 mod planner;
 mod catalog;
