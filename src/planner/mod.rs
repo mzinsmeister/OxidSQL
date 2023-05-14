@@ -5,7 +5,7 @@
  */
 mod bottomup;
 
-use std::{collections::BTreeMap};
+use std::{collections::BTreeMap, fmt::{Formatter, Debug}};
 
 use crate::{catalog::{AttributeDesc, TableDesc}, types::TupleValue, execution::plan::PhysicalQueryPlan};
 
@@ -88,4 +88,9 @@ pub trait Planner {
 }
 
  pub enum PlannerError {}
- 
+
+ impl Debug for PlannerError {
+     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+         write!(f, "PlannerError")
+     }
+ } 
