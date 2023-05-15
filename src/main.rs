@@ -11,6 +11,9 @@ mod statistics;
 mod optimizer;
 mod planner;
 mod catalog;
+mod analyzer;
+mod parser;
+
 
 fn main() {
     println!("OxidSQL - Rusty SQL Database");    
