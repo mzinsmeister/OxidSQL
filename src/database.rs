@@ -11,7 +11,6 @@ type BufferManagerType = Arc<HashTableBufferManager<ClockReplacer, DiskManager>>
 pub struct OxidSQLDatabase {
     catalog: Catalog<BufferManagerType>,
     buffer_manager: BufferManagerType,
-    replacer: ClockReplacer,
     planner: BottomUpPlanner,
     executor: volcano_style::Engine,
     analyzer: Analyzer<BufferManagerType>
