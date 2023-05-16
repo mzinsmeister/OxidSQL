@@ -20,7 +20,6 @@ impl OxidSQLDatabase {
     pub fn new(data_path: PathBuf, buffer_size: usize) -> OxidSQLDatabase {
         let disk_manager = DiskManager::new(data_path);
         let buffer_manager = HashTableBufferManager::new(disk_manager, ClockReplacer::new(), buffer_size);
-        let replacer = ClockReplacer::new();
         let catalog = Catalog::new(buffer_manager.clone());
         let analyzer = Analyzer::new(catalog.clone());
         let planner = BottomUpPlanner::new();
@@ -28,7 +27,6 @@ impl OxidSQLDatabase {
         OxidSQLDatabase {
             catalog,
             buffer_manager,
-            replacer,
             planner,
             executor,
             analyzer
