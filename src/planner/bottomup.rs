@@ -169,36 +169,41 @@ mod test {
         let plan = planner.plan(&query).unwrap();
         assert_eq!(plan.cost, 0.0);
         match plan.root_operator {
-            PhysicalQueryPlanOperator::Projection { projection_ius, input } => {
-                assert_eq!(projection_ius, vec![0]);
+            PhysicalQueryPlanOperator::Print { input, tuple_writer } => {
                 match *input {
-                    PhysicalQueryPlanOperator::Tablescan { table } => {
-                        assert_eq!(table, TableDesc {
-                            id: 0,
-                            segment_id: 1000,
-                            name: "test".to_string(),
-                            attributes: vec![
-                                AttributeDesc {
-                                    id: 1,
-                                    name: "id".to_string(),
-                                    table_ref: 1,
-                                    data_type: TupleValueType::Int,
-                                    nullable: false,
-                                },
-                                AttributeDesc {
-                                    id: 2,
-                                    name: "name".to_string(),
-                                    table_ref: 1,
-                                    data_type: TupleValueType::VarChar(500),
-                                    nullable: false,
-                                },
-                            ],
-                            cardinality: 100,
-                        });
+                    PhysicalQueryPlanOperator::Projection { projection_ius, input } => {
+                        assert_eq!(projection_ius, vec![0]);
+                        match *input {
+                            PhysicalQueryPlanOperator::Tablescan { table } => {
+                                assert_eq!(table, TableDesc {
+                                    id: 0,
+                                    segment_id: 1000,
+                                    name: "test".to_string(),
+                                    attributes: vec![
+                                        AttributeDesc {
+                                            id: 1,
+                                            name: "id".to_string(),
+                                            table_ref: 1,
+                                            data_type: TupleValueType::Int,
+                                            nullable: false,
+                                        },
+                                        AttributeDesc {
+                                            id: 2,
+                                            name: "name".to_string(),
+                                            table_ref: 1,
+                                            data_type: TupleValueType::VarChar(500),
+                                            nullable: false,
+                                        },
+                                    ],
+                                    cardinality: 100,
+                                });
+                            },
+                            _ => unreachable!()
+                        }
                     },
                     _ => unreachable!()
                 }
-            },
+            }
             _ => unreachable!() 
         }
     }
