@@ -1,4 +1,4 @@
-use std::{fs::{File, metadata}, path::PathBuf, sync::Arc, collections::HashMap};
+use std::{fs::{File, metadata}, path::PathBuf, sync::Arc, collections::HashMap, fmt::Debug};
 
 use super::page::{PAGE_SIZE, PageId, RelationIdType, SegmentId};
 
@@ -8,15 +8,17 @@ use parking_lot::RwLock;
 
 
 #[cfg_attr(test, automock)]
-pub trait StorageManager: Sync + Send {
-  fn create_relation(&self, segment_id: RelationIdType);
+pub trait StorageManager: Debug + Sync + Send {
+  fn create_segment(&self, segment_id: RelationIdType);
   fn read_page(&self, page_id: PageId, buf: &mut[u8]) -> Result<(), std::io::Error>;
   fn write_page(&self, page_id: PageId, buf: &[u8]) -> Result<(), std::io::Error>;
   fn get_relation_size(&self, segment_id: RelationIdType) -> u64;
 }
 
+
+#[derive(Debug)]
 pub(crate) struct DiskManager {
-  data_folder: Arc<RwLock<PathBuf>>,
+  data_folder: Arc<PathBuf>,
   #[cfg(unix)]
   file_cache: Arc<RwLock<HashMap<SegmentId, File>>>
 }
@@ -24,7 +26,7 @@ pub(crate) struct DiskManager {
 impl DiskManager {
   pub fn new(data_folder: PathBuf) -> DiskManager {
     DiskManager {
-      data_folder: Arc::new(RwLock::new(data_folder)),
+      data_folder: Arc::new(data_folder),
       #[cfg(unix)]
       file_cache: Arc::new(RwLock::new(HashMap::new()))
     }
@@ -51,8 +53,12 @@ impl DiskManager {
       return file;
     }
 
-    let path = self.data_folder.read()
-                          .join(segment_id.to_string());
+    let path = self.data_folder.join(segment_id.to_string());
+
+    if !path.is_file() {
+      File::create(path.clone()).unwrap();
+    }
+
 
     let file = File::options()
       .read(true)
@@ -93,8 +99,8 @@ impl DiskManager {
 
 impl StorageManager for DiskManager {
 
-  fn create_relation(&self, segment_id: RelationIdType) {
-    File::create(self.data_folder.read().join(segment_id.to_string())).unwrap();
+  fn create_segment(&self, segment_id: RelationIdType) {
+    File::create(self.data_folder.join(segment_id.to_string())).unwrap();
   }
 
   #[cfg(unix)]
@@ -111,7 +117,7 @@ impl StorageManager for DiskManager {
   fn write_page(&self, page_id: PageId, buf: &[u8]) -> Result<(), std::io::Error> {
     use std::os::unix::prelude::FileExt;
 
-    let mut file = self.open_file(page_id.segment_id, AccessType::Write);
+    let file = self.open_file(page_id.segment_id, AccessType::Write);
     let offset = page_id.offset_id as u64 * PAGE_SIZE as u64;
     file.write_all_at(buf, offset)?;
     Ok(())
@@ -139,7 +145,7 @@ impl StorageManager for DiskManager {
 
   fn get_relation_size(&self, segment_id: RelationIdType) -> u64 {
     //TODO: It would be better to return 0 if the file doesn't exist instead of creating it
-    let path = self.data_folder.read().join(segment_id.to_string());
+    let path = self.data_folder.join(segment_id.to_string());
     if path.is_file(){
       metadata(path.clone()).unwrap().len()
     } else {

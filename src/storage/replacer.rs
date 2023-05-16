@@ -1,4 +1,4 @@
-use std::{option::Option, sync::Arc};
+use std::{option::Option, sync::Arc, fmt::Debug};
 
 use super::{page::{PageId, Page}, buffer_manager::PageType};
 
@@ -7,7 +7,7 @@ use mockall::automock;
 use parking_lot::RwLock;
 
 #[cfg_attr(test, automock)]
-pub trait Replacer {
+pub trait Replacer: Debug {
   fn find_victim<'a>(&mut self) -> Option<(PageId)>;
   fn use_page(&mut self, page_id: PageId);
   fn has_page(&self, page_id: PageId) -> bool;

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::storage::{buffer_manager::{BufferManager, BufferManagerError}, page::{PAGE_SIZE, PageId, Page, OffsetId}};
+use crate::storage::{buffer_manager::BufferManager, page::{PAGE_SIZE, PageId, Page, OffsetId}};
 
 /*
 Free Space Segment:
@@ -80,7 +80,7 @@ impl<B: BufferManager> FreeSpaceSegment<B> {
         }
     }
 
-    pub fn find_page(&self, size: u32) -> Result<OffsetId, BufferManagerError> {
+    pub fn find_page(&self, size: u32) -> Result<OffsetId, B::BError> {
         // Page must have at most one less than this size class except for empty pages
         let encoded = self.encode(self.max_useable_space - size as usize).max(1) - 1; 
         let page = self.bm.fix_page(PageId::new(self.segment_id, 0))?;
@@ -88,7 +88,7 @@ impl<B: BufferManager> FreeSpaceSegment<B> {
         Ok(Self::read_cache_for_size_class(&page_read, encoded))
     }
 
-    pub fn update_page_size(&self, page_nr: u64, size: u32) -> Result<(), BufferManagerError> {
+    pub fn update_page_size(&self, page_nr: u64, size: u32) -> Result<(), B::BError> {
         // Page must have at most this size class
         let size_nibble = self.encode(self.max_useable_space - size as usize);
         let fsi_page = (page_nr + 15*16) / (PAGE_SIZE as u64 * 2);

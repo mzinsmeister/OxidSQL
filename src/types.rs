@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RelationTID {
     pub page_id: u64, // only current segment (48 bits max)
@@ -122,6 +124,17 @@ impl PartialOrd for TupleValue {
             (TupleValue::SmallInt(a), TupleValue::BigInt(b)) => (*a as i64).partial_cmp(b),
             (TupleValue::SmallInt(a), TupleValue::Int(b)) => (*a as i32).partial_cmp(b),
             _ => None
+        }
+    }
+}
+
+impl Display for TupleValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TupleValue::BigInt(i) => write!(f, "{}", i),
+            TupleValue::Int(i) => write!(f, "{}", i),
+            TupleValue::SmallInt(i) => write!(f, "{}", i),
+            TupleValue::String(s) => write!(f, "\"{}\"", s.escape_debug()),
         }
     }
 }

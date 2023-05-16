@@ -10,11 +10,13 @@
             - Write a parser from scratch
  */
 
+use std::fmt::Display;
+
 use nom::IResult;
 use nom::bytes::complete::{tag_no_case, tag, is_not, is_a, take_while1};
 use nom::character::complete::{multispace0, multispace1, char, digit1};
 use nom::combinator::{opt, map_res, map};
-use nom::sequence::{delimited, tuple};
+use nom::sequence::{delimited, tuple, preceded};
 use nom::branch::alt;
 use nom::character::{is_alphanumeric};
 use nom::multi::separated_list1;
@@ -30,9 +32,69 @@ pub enum ParseTree<'a> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+pub struct BoundParseAttribute<'a> {
+    pub name: &'a str,
+    pub binding: Option<&'a str>
+}
+
+impl<'a> BoundParseAttribute<'a> {
+    pub fn new(name: &'a str, binding: Option<&'a str>) -> BoundParseAttribute<'a> {
+        BoundParseAttribute { name, binding }
+    }
+
+    pub fn new_bound(name: &'a str, binding: &'a str) -> BoundParseAttribute<'a> {
+        BoundParseAttribute { name, binding: Some(binding) }
+    }
+
+    pub fn new_unbound(name: &'a str) -> BoundParseAttribute<'a> {
+        BoundParseAttribute { name, binding: None }
+    }
+}
+
+impl Display for BoundParseAttribute<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(binding) = self.binding {
+            write!(f, "{}.{}", binding, self.name)
+        } else {
+            write!(f, "{}", self.name)
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct BoundParseTable<'a> {
+    pub name: &'a str,
+    pub binding: Option<&'a str>
+}
+
+impl<'a> BoundParseTable<'a> {
+    pub fn new(name: &'a str, binding: Option<&'a str>) -> BoundParseTable<'a> {
+        BoundParseTable { name, binding }
+    }
+
+    pub fn new_bound(name: &'a str, binding: &'a str) -> BoundParseTable<'a> {
+        BoundParseTable { name, binding: Some(binding) }
+    }
+
+    pub fn new_unbound(name: &'a str) -> BoundParseTable<'a> {
+        BoundParseTable { name, binding: None }
+    }
+}
+
+impl Display for BoundParseTable<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(binding) = self.binding {
+            write!(f, "{} {}", self.name, binding)
+        } else {
+            write!(f, "{}", self.name)
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub struct SelectParseTree<'a> {
-    pub columns: Vec<&'a str>,
-    pub from_tables: Vec<&'a str>,
+    pub columns: Vec<BoundParseAttribute<'a>>,
+    pub from_tables: Vec<BoundParseTable<'a>>,
     pub where_clause: Option<ParseWhereClause<'a>>
 }
 
@@ -50,30 +112,61 @@ pub enum ParseWhereClause<'a> {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ParseWhereClauseItem<'a> {
-    Name(&'a str),
+    Name(BoundParseAttribute<'a>),
     Value(TupleValue)
 }
 
-pub fn parse_query(query: &str) -> IResult<&str, ParseTree> {
+pub fn parse_query<'a>(query: &'a str) -> IResult<&'a str, ParseTree> {
     alt((parse_select, parse_insert, parse_create_table))(query)
 }
 
 fn parse_select(rest_query: &str) -> IResult<&str, ParseTree> {
     let (rest_query, _) = tag_no_case("SELECT")(rest_query)?;
     let (rest_query, _) = multispace1(rest_query)?;
-    let (rest_query, select) = parse_sql_list(rest_query)?;
+    let (rest_query, select) = parse_sql_bound_attribute_list(rest_query)?;
     let (rest_query, _) = tag_no_case("FROM")(rest_query)?;
     let (rest_query, _) = multispace1(rest_query)?;
-    let (rest_query, from) = parse_sql_list(rest_query)?;
+    let (rest_query, from) = parse_sql_from_list(rest_query)?;
     let (_, where_clause) = opt(parse_where_and_where_clause)(rest_query)?;
     Ok(("", ParseTree::Select(SelectParseTree { columns: select, from_tables: from, where_clause })))
 }
 
-fn parse_sql_list(rest_query: &str) -> IResult<&str, Vec<&str>> {
+fn parse_sql_bound_attribute_list(rest_query: &str) -> IResult<&str, Vec<BoundParseAttribute>> {
     let (rest_query, list) =
-        separated_list1(parse_sql_list_separator, take_while1(is_sql_identifier_char))(rest_query)?;
+        separated_list1(parse_sql_list_separator, parse_sql_bound_attribute)(rest_query)?;
     let (rest_query, _) = multispace0(rest_query)?;
     Ok((rest_query, list))
+}
+
+fn parse_sql_bound_attribute(rest_query: & str) -> IResult<&str, BoundParseAttribute> {
+    let (rest_query, elem1) = take_while1(is_sql_identifier_char)(rest_query)?;
+    let (rest_query, elem2) = opt(preceded(tag("."), take_while1(is_sql_identifier_char)))(rest_query)?;
+    let (rest_query, _) = multispace0(rest_query)?;
+    if let Some(name) = elem2 {
+        Ok((rest_query, BoundParseAttribute { name, binding: Some(elem1) }))
+    } else {
+        Ok((rest_query, BoundParseAttribute { name: elem1, binding: None }))
+    }
+}
+
+fn parse_sql_from_list(rest_query: &str) -> IResult<&str, Vec<BoundParseTable>> {
+    let (rest_query, list) =
+        separated_list1(parse_sql_list_separator, parse_sql_bound_table)(rest_query)?;
+    let (rest_query, _) = multispace0(rest_query)?;
+    Ok((rest_query, list))
+}
+
+fn parse_sql_bound_table(rest_query: &str) -> IResult<&str, BoundParseTable> {
+    let (rest_query, name) = take_while1(is_sql_identifier_char)(rest_query)?;
+    let (rest_query, _) = multispace0(rest_query)?;
+    let (binding_rest_query, binding) = opt(take_while1(is_sql_identifier_char))(rest_query)?;
+    let (rest_query, binding) = if binding.map(|s| s.eq_ignore_ascii_case("where")) != Some(true) {
+        (binding_rest_query, binding)
+    } else {
+        (rest_query, None)
+    };
+    let (rest_query, _) = multispace0(rest_query)?;
+    Ok((rest_query, BoundParseTable { name, binding }))
 }
 
 fn parse_sql_list_separator(rest_query: &str) -> IResult<&str, &str> {
@@ -151,7 +244,7 @@ fn parse_where_clause_item(item: &str) -> ParseWhereClauseItem {
     } else if item.parse::<i64>().is_ok() {
         ParseWhereClauseItem::Value(TupleValue::BigInt(item.parse::<i64>().unwrap()))
     } else {
-        ParseWhereClauseItem::Name(item)
+        ParseWhereClauseItem::Name(parse_sql_bound_attribute(item).unwrap().1)
     }
 }
 
@@ -316,22 +409,22 @@ mod test {
         let query = "SELECT a, b FROM test";
 
         test_parse(query, ParseTree::Select(SelectParseTree {
-            columns: vec!["a", "b"],
-            from_tables: vec!["test"],
+            columns: vec![BoundParseAttribute::new_unbound("a"), BoundParseAttribute::new_unbound("b")],
+            from_tables: vec![BoundParseTable::new_unbound("test")],
             where_clause: None
         }));
     }
 
     #[test]
     fn test_simple_select_with_where() {
-        let query = "SELECT a, b FROM test where c = 5";
+        let query = "SELECT a, b FROM test t where t.c = 5";
 
         test_parse(query, ParseTree::Select(SelectParseTree {
-            columns: vec!["a", "b"],
-            from_tables: vec!["test"],
+            columns: vec![BoundParseAttribute::new_unbound("a"), BoundParseAttribute::new_unbound("b")],
+            from_tables: vec![BoundParseTable::new_bound("test", "t")],
             where_clause: Some(
                 ParseWhereClause::Equals(
-                    ParseWhereClauseItem::Name("c"), 
+                    ParseWhereClauseItem::Name(BoundParseAttribute::new_bound("c", "t")), 
                     ParseWhereClauseItem::Value(TupleValue::BigInt(5))
                 )
             )
@@ -343,11 +436,11 @@ mod test {
         let query = "SEleCT a, b frOm test where c = 5";
 
         test_parse(query, ParseTree::Select(SelectParseTree {
-            columns: vec!["a", "b"],
-            from_tables: vec!["test"],
+            columns: vec![BoundParseAttribute::new_unbound("a"), BoundParseAttribute::new_unbound("b")],
+            from_tables: vec![BoundParseTable::new_unbound("test")],
             where_clause: Some(
                 ParseWhereClause::Equals(
-                    ParseWhereClauseItem::Name("c"), 
+                    ParseWhereClauseItem::Name(BoundParseAttribute::new_unbound("c")), 
                     ParseWhereClauseItem::Value(TupleValue::BigInt(5))
                 )
             )
@@ -364,11 +457,14 @@ mod test {
     fn test_parse(query: &str, expected: ParseTree) {
         let parse_tree = parse_query(query);
 
-        if let Ok((rest, parse_tree)) = parse_tree {
-            assert_eq!(rest.replace(|c: char| c.is_whitespace(), ""), "");
-            assert_eq!(expected, parse_tree);
-        } else {
-            panic!("Parse error where successful parse was expected");
+        match parse_tree {
+            Ok((rest, parse_tree)) => {
+                assert_eq!(rest.replace(|c: char| c.is_whitespace(), ""), "");
+                assert_eq!(expected, parse_tree);
+            },
+            Err(e) => {
+                panic!("Parse error where successful parse was expected: {}", e);
+            }
         }
     }
 

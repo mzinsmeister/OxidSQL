@@ -5,7 +5,7 @@ use crate::util::align::alligned_slice;
 use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
-use std::fmt::Display;
+use std::fmt::{Display, Debug};
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -72,6 +72,7 @@ fn new_page(page_id: PageId) -> PageType {
     Arc::new(RwLock::new(Page::new(page_id)))
 }
 
+#[derive(Debug)]
 pub(super) struct PageTableBucket {
     bucket: Vec<(PageId, PageType)>
 }
@@ -141,13 +142,14 @@ impl PageTableBucket {
  */
 
 // We require Static lifetime here. Maybe something less strict would be enough later
-pub trait BufferManager: Sync + Send + Sized + Clone + 'static { 
-    type Error;
-    fn fix_page<'a>(&'a self, page_id: PageId) -> Result<BMArc<Self>, BufferManagerError>;
-    fn flush(&self) -> Result<(), BufferManagerError>;
+pub trait BufferManager: Debug + Sync + Send + Sized + Clone + 'static { 
+    type BError: Error;
+    fn fix_page<'a>(&'a self, page_id: PageId) -> Result<BMArc<Self>, Self::BError>;
+    fn flush(&self) -> Result<(), Self::BError>;
     fn segment_size(&self, segment_id: SegmentId) -> usize;
 }
 
+#[derive(Debug)]
 pub struct HashTableBufferManager<R: Replacer + Send, S: StorageManager> {
     pagetable: PageTableType,
     pagetable_size: AtomicUsize,
@@ -300,7 +302,7 @@ impl<R: Replacer + Send, S: StorageManager> HashTableBufferManager<R, S> {
                             .collect()
     }
 
-    fn flush(&self) -> Result<(), BufferManagerError> {
+    pub fn flush(&self) -> Result<(), BufferManagerError> {
         for bucket in &self.pagetable {
             for (_, page) in bucket.lock().bucket.iter() {
                 let mut page = page.write();
@@ -315,7 +317,7 @@ impl<R: Replacer + Send, S: StorageManager> HashTableBufferManager<R, S> {
 }
 
 impl<R: Replacer + Send + 'static, S: StorageManager + 'static> BufferManager for Arc<HashTableBufferManager<R,S>> {
-    type Error = BufferManagerError;
+    type BError = BufferManagerError;
     fn fix_page<'a>(&'a self, page_id: PageId) -> Result<BMArc<Self>, BufferManagerError> {
         let page_bucket = self.pagetable[self.get_pagetable_index(page_id)].lock();
         let page = if let Some(result) = page_bucket.get(page_id) {
@@ -365,6 +367,7 @@ pub mod mock {
 
     use super::{PageType, BufferManager, new_page, BMArc};
 
+    #[derive(Debug)]
     pub struct MockBufferManager {
         page_size: usize,
         segments: Mutex<HashMap<u16, HashMap<u64, PageType>>>
@@ -380,7 +383,7 @@ pub mod mock {
     }
 
     impl BufferManager for Arc<MockBufferManager> {
-        type Error = super::BufferManagerError;
+        type BError = super::BufferManagerError;
         fn fix_page<'a>(&'a self, page_id: PageId) -> Result<BMArc<Self>, super::BufferManagerError> {
             let mut segments = self.segments.lock();
             let page = segments
@@ -525,7 +528,7 @@ mod tests {
     fn multithreaded_contention_test(num_threads: u64, num_ops: usize, bm_size: usize, every_nth_new: u64) {
         let datadir = tempfile::tempdir().unwrap();
         let disk_manager = DiskManager::new(datadir.into_path());
-        disk_manager.create_relation(1);
+        disk_manager.create_segment(1);
         let bpm = Arc::new(HashTableBufferManager::new(disk_manager, ClockReplacer::new(), bm_size));
         let next_offset_id = Arc::new(AtomicU32::new(0));
         let page_counter = Arc::new(AtomicU32::new(0));

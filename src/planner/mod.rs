@@ -3,9 +3,9 @@
           by applying rewrite rules and possibly using optimization techniques implemented in
           the optimizer module.
  */
-mod bottomup;
+pub mod bottomup;
 
-use std::{collections::BTreeMap, fmt::{Formatter, Debug}};
+use std::{collections::BTreeMap, fmt::{Formatter, Debug, Display}};
 
 use crate::{catalog::{AttributeDesc, TableDesc}, types::TupleValue, execution::plan::PhysicalQueryPlan};
 
@@ -58,6 +58,14 @@ impl BoundAttribute {
             binding: self.binding.clone()
         }
     }
+
+    pub fn get_qualified_name(&self) -> String {
+        if let Some(binding) = &self.binding {
+            format!("{}.{}", binding, self.attribute.name)
+        } else {
+            self.attribute.name.clone()
+        }
+    }
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -94,3 +102,11 @@ pub trait Planner {
          write!(f, "PlannerError")
      }
  } 
+
+impl Display for PlannerError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PlannerError")
+    }
+}
+
+impl std::error::Error for PlannerError {}

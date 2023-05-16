@@ -1,7 +1,6 @@
-use std::{sync::Arc, collections::BTreeMap, ops::{Deref, DerefMut}};
-use parking_lot::{lock_api::{ArcMutexGuard, ArcRwLockReadGuard}, RwLock, RawRwLock};
+use std::{collections::BTreeMap, ops::{Deref, DerefMut}};
 
-use crate::{storage::{buffer_manager::{BufferManager, BufferManagerError, BMArc}, page::{Page, PAGE_SIZE, PageId}}, types::RelationTID};
+use crate::{storage::{buffer_manager::{BufferManager, BMArc}, page::{Page, PAGE_SIZE, PageId}}, types::RelationTID};
 
 use super::{free_space_inventory::FreeSpaceSegment, tuple::Tuple};
 
@@ -129,7 +128,7 @@ impl<B: BufferManager> SlottedPageSegment<B> {
     /// or just a copy of the data. Its result cannot reference the data in the page though.
     /// The operation should be idempotent as it's not guaranteed that in the future there won't be some optimistic optimization.
     // This should be the most flexible way to implement this
-    pub fn get_record<T, F: Fn(&[u8]) -> T>(&self, tid: RelationTID, operation: F) -> Result<T, BufferManagerError> {
+    pub fn get_record<T, F: Fn(&[u8]) -> T>(&self, tid: RelationTID, operation: F) -> Result<T, B::BError> {
         let page = self.bm.fix_page(PageId::new(self.segment_id, tid.page_id))?;
         let page_read = page.read();
         let slotted_page = SlottedPage::new(page_read);
@@ -150,8 +149,8 @@ impl<B: BufferManager> SlottedPageSegment<B> {
     }
 
     // Operation takes a mutable reference to the page, the slot_id and the offset and length of the new record
-    fn allocate_and_do<F: FnMut(&mut SlottedPage<&mut Page>, RelationTID, u32, u32) -> Result<(), BufferManagerError>,
-                        C: Fn(u64) -> bool>(&self, size: usize, mut operation: F, page_id_check: C) -> Result<RelationTID, BufferManagerError> {
+    fn allocate_and_do<F: FnMut(&mut SlottedPage<&mut Page>, RelationTID, u32, u32) -> Result<(), B::BError>,
+                        C: Fn(u64) -> bool>(&self, size: usize, mut operation: F, page_id_check: C) -> Result<RelationTID, B::BError> {
         if size > PAGE_SIZE - HEADER_SIZE {
             panic!("Data too large for page"); // Caller is responsible for ensuring this
         }
@@ -183,19 +182,19 @@ impl<B: BufferManager> SlottedPageSegment<B> {
         }
     }
 
-    pub fn insert_record(&self, data: &[u8]) -> Result<RelationTID, BufferManagerError> {
+    pub fn insert_record(&self, data: &[u8]) -> Result<RelationTID, B::BError> {
         self.allocate_and_do(data.len(), |page, _, offset, length| {
             page.get_record_mut(offset, length).copy_from_slice(data);
             Ok(())
         }, |page_id| true)
     }
 
-    pub fn allocate(&self, size: u16) -> Result<RelationTID, BufferManagerError> {
+    pub fn allocate(&self, size: u16) -> Result<RelationTID, B::BError> {
         self.allocate_and_do(size as usize, |_, _, _ , _| {Ok(())}, |page_id| true)
     }
 
     fn resize_and_do_redirect<F: Fn(&mut [u8]), P: DerefMut<Target=Page>>(&self, tid: RelationTID, redirect_tid: RelationTID, slotted_root_page: &mut SlottedPage<P>, 
-                                                    size: usize, copy_previous: bool, operation: F) -> Result<(), BufferManagerError> {
+                                                    size: usize, copy_previous: bool, operation: F) -> Result<(), B::BError> {
         let redirect_target_page = self.bm.fix_page(PageId::new(self.segment_id, redirect_tid.page_id))?;
         let redirect_target_page_write = redirect_target_page.write();
         let mut slotted_redirect_target_page = SlottedPage::new(redirect_target_page_write);
@@ -225,7 +224,7 @@ impl<B: BufferManager> SlottedPageSegment<B> {
                     panic!("Successful relocate should have kept it a redirect target");
                 }
             }
-            self.allocate_and_do(size + 8, |slotted_alloc_page: &mut SlottedPage<&mut Page>, new_tid: RelationTID, new_offset, new_length| -> Result<(), BufferManagerError> {
+            self.allocate_and_do(size + 8, |slotted_alloc_page: &mut SlottedPage<&mut Page>, new_tid: RelationTID, new_offset, new_length| -> Result<(), B::BError> {
                 slotted_root_page.write_slot(tid.slot_id, &Slot::Redirect { tid: RelationTID { page_id: new_tid.page_id, slot_id: new_tid.slot_id } });
                 slotted_alloc_page.write_slot(new_tid.slot_id, &Slot::RedirectTarget{ offset: new_offset, length: new_length });
                 slotted_alloc_page.get_record_mut(offset, 8).copy_from_slice(u64::from(&tid).to_be_bytes().as_ref());
@@ -246,7 +245,7 @@ impl<B: BufferManager> SlottedPageSegment<B> {
         }
     }
 
-    fn resize_and_do<F: Fn(&mut [u8])>(&self, tid: RelationTID, size: usize, copy_previous: bool, operation: F) -> Result<(), BufferManagerError> {
+    fn resize_and_do<F: Fn(&mut [u8])>(&self, tid: RelationTID, size: usize, copy_previous: bool, operation: F) -> Result<(), B::BError> {
         if size > self.max_useable_space() {
             panic!("Data too large for page"); // Caller is responsible for 
         }
@@ -297,11 +296,11 @@ impl<B: BufferManager> SlottedPageSegment<B> {
     }
     }
 
-    pub fn write_record(&self, tid: RelationTID, data: &[u8]) -> Result<(), BufferManagerError> {
+    pub fn write_record(&self, tid: RelationTID, data: &[u8]) -> Result<(), B::BError> {
         self.resize_and_do(tid, data.len(), false, |record| record.copy_from_slice(data))
     }
 
-    pub fn resize_record(&self, tid: RelationTID, size: usize) -> Result<(), BufferManagerError> {
+    pub fn resize_record(&self, tid: RelationTID, size: usize) -> Result<(), B::BError> {
         self.resize_and_do(tid, size, true, |_| {})
     }
 
@@ -332,7 +331,7 @@ pub struct SlottedPageScan<B: BufferManager, T, F: FnMut(&[u8]) -> Option<T>> {
 }
 
 impl<'a, B: BufferManager, T, F: FnMut(&[u8]) -> Option<T>> Iterator for SlottedPageScan<B, T, F> {
-    type Item = Result<(RelationTID, T), BufferManagerError>;
+    type Item = Result<(RelationTID, T), B::BError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.page.is_none() {

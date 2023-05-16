@@ -81,6 +81,13 @@ impl StdOutTupleWriter {
             header_written: false,
         }
     }
+
+    fn format_tuple_value(value: &Option<TupleValue>) -> String {
+        match value {
+            Some(v) => format!("{}", v),
+            None => "[null]".to_string(),
+        }
+    }
 }
 
 impl TupleWriter for StdOutTupleWriter {
@@ -89,7 +96,10 @@ impl TupleWriter for StdOutTupleWriter {
             println!("{}", self.attribute_names.join(" | "));
             self.header_written = true;
         }
-        println!("{}", tuple.iter().map(|v| format!("{:#?}", v)).collect::<Vec<String>>().join(" | "));
+        let line = tuple.iter()
+            .map(|v| Self::format_tuple_value(v))
+            .collect::<Vec<String>>().join(" | ");
+        println!("{}", line);
     }
 
     fn clone_box(&self) -> Box<dyn TupleWriter> {

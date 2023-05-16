@@ -89,6 +89,7 @@ impl PageState {
     }
 }
 
+#[derive(Debug)]
 pub struct Page{
     pub(super) data: AlignedSlice,
     pub state: PageState,

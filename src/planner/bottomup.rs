@@ -5,11 +5,17 @@
 
 use std::{collections::BTreeMap};
 
-use crate::{execution::{plan::{PhysicalQueryPlan, self, PhysicalQueryPlanOperator}}, optimizer::{query_graph::QueryGraph, optimizer::{run_dp_ccp, OptimizerResult}}, types::TupleValue, planner::BoundTableRef};
+use crate::{execution::{plan::{PhysicalQueryPlan, self, PhysicalQueryPlanOperator, StdOutTupleWriter}}, optimizer::{query_graph::QueryGraph, optimizer::{run_dp_ccp, OptimizerResult}}, types::TupleValue, planner::BoundTableRef};
 
-use super::{Planner, Query, PlannerError};
+use super::{Planner, Query, PlannerError, BoundAttribute};
 
-struct BottomUpPlanner {}
+pub struct BottomUpPlanner {}
+
+impl BottomUpPlanner{
+    pub fn new() -> Self {
+        Self {}
+    }
+}
 
 impl Planner for BottomUpPlanner {
     fn plan(&self, query: &Query) -> Result<PhysicalQueryPlan, PlannerError> {
@@ -19,7 +25,12 @@ impl Planner for BottomUpPlanner {
         
         // collect the positions of all attributes to add the projection
         let cost = optimizer_result.cost;
-        let root_operator = get_projection(query, optimizer_result);
+        let projection = get_projection(query, optimizer_result);
+        let attribute_names = query.select.iter().map(BoundAttribute::get_qualified_name).collect();
+        let root_operator = PhysicalQueryPlanOperator::Print { 
+            input: Box::new(projection), 
+            tuple_writer: Box::new(StdOutTupleWriter::new(attribute_names)) 
+        };
 
         Ok(PhysicalQueryPlan {
             root_operator,

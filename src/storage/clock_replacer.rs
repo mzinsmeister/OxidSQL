@@ -7,12 +7,14 @@ use crate::storage::replacer::can_page_be_replaced;
 use super::{page::{PageId, Page}, replacer::Replacer, buffer_manager::PageType};
 
 
+#[derive(Debug)]
 struct ClockPageInfo {
   clock_used: bool,
   page_id: PageId,
   page: PageType
 }
 
+#[derive(Debug)]
 pub(crate) struct ClockReplacer {
   // Would probably be more elegant to have a replacer specific struct included with every BufferFrame
   // But this is fine for now. At least guarantees O(1) lookup time for a specific Page and 

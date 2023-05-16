@@ -1,13 +1,13 @@
-use std::{cell::RefCell, rc::Rc, collections::HashMap};
+use std::{cell::RefCell, rc::Rc, collections::HashMap, error::Error};
 
-use crate::{catalog::TableDesc, access::{SlottedPageScan, SlottedPageSegment, tuple::Tuple}, storage::buffer_manager::{BufferManager, BufferManagerError}, types::{TupleValueType, TupleValue}, execution::plan::{self, PhysicalQueryPlanOperator, PhysicalQueryPlan, TupleWriter}};
+use crate::{catalog::TableDesc, access::{SlottedPageScan, SlottedPageSegment, tuple::Tuple}, types::{TupleValueType, TupleValue}, execution::plan::{self, PhysicalQueryPlanOperator, PhysicalQueryPlan, TupleWriter}, storage::buffer_manager::BufferManager};
 
 use super::{ExecutionEngine};
 
 pub type Register = Rc<RefCell<Option<TupleValue>>>; // Only single threaded execution for now
 
 trait Operator {
-    fn next(&mut self)-> Result<bool, BufferManagerError> ;
+    fn next(&mut self)-> Result<bool, Box<dyn Error>> ;
     fn get_output(&self) -> &[Register];
 }
 
@@ -36,7 +36,7 @@ fn new_scan<'a, B: BufferManager>(sp_segment: SlottedPageSegment<B>, table_desc:
 }
 
 impl<'a, B: BufferManager, F: FnMut(&[u8]) -> Option<Tuple>> Operator for TableScan<B, F> {
-    fn next(&mut self) -> Result<bool, BufferManagerError> {
+    fn next(&mut self) -> Result<bool, Box<dyn Error>> {
         if let Some(tuple) = self.scan.next() {
             let (_, mut tuple) = tuple?;
             for i in 0..self.table_desc.attributes.len() {
@@ -101,7 +101,7 @@ impl Selection {
 }
 
 impl Operator for Selection {
-    fn next(&mut self) -> Result<bool, BufferManagerError> {
+    fn next(&mut self) -> Result<bool, Box<dyn Error>> {
         while self.child.next()? {
             if self.predicate.evaluate() {
                 return Ok(true);
@@ -134,7 +134,7 @@ impl Projection {
 }
 
 impl Operator for Projection {
-    fn next(&mut self) -> Result<bool, BufferManagerError> {
+    fn next(&mut self) -> Result<bool, Box<dyn Error>> {
         self.child.next()
     }
 
@@ -174,7 +174,7 @@ impl HashJoin {
 }
 
 impl Operator for HashJoin {
-    fn next(&mut self)-> Result<bool, BufferManagerError>  {
+    fn next(&mut self)-> Result<bool, Box<dyn Error>>  {
         let ht = if self.hash_table.is_some() {
             self.hash_table.as_ref().unwrap()
         } else {
@@ -231,7 +231,7 @@ impl Print {
 }
 
 impl Operator for Print {
-    fn next(&mut self) -> Result<bool, BufferManagerError> {
+    fn next(&mut self) -> Result<bool, Box<dyn Error>> {
         if self.child.next()? {
             let elems = self.child.get_output().iter()
                 .map(|register| register.borrow().clone())
@@ -249,10 +249,10 @@ impl Operator for Print {
 }
 
 
-struct Engine;
+pub struct Engine;
 
 impl Engine {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Engine
     }
 
@@ -293,13 +293,21 @@ impl Engine {
                 let predicate = Self::convert_predicate_to_volcano_style(predicate, child.get_output());
                 Box::new(Selection::new(child, predicate))
             },
-            _ => unimplemented!()
+            PhysicalQueryPlanOperator::HashJoin { left, right, on } => {
+                let left = Self::convert_physical_plan_to_volcano_plan(buffer_manager.clone(), *left);
+                let right = Self::convert_physical_plan_to_volcano_plan(buffer_manager, *right);
+                Box::new(HashJoin::new(left, right, on))
+            },
+            PhysicalQueryPlanOperator::Projection { projection_ius, input } => {
+                let child = Self::convert_physical_plan_to_volcano_plan(buffer_manager, *input);
+                Box::new(Projection::new(child, projection_ius))
+            }
         }
     }
 }
 
 impl<B: BufferManager> ExecutionEngine<B> for Engine {
-    fn execute(&self, plan: PhysicalQueryPlan, buffer_manager: B) -> Result<(), BufferManagerError> {
+    fn execute(&self, plan: PhysicalQueryPlan, buffer_manager: B) -> Result<(), Box<dyn Error>> {
         let mut volcano_plan = Self::convert_physical_plan_to_volcano_plan(buffer_manager, plan.root_operator);
         while volcano_plan.next()? {
             // Do nothing
@@ -308,8 +316,11 @@ impl<B: BufferManager> ExecutionEngine<B> for Engine {
     }
 }
 
+#[cfg(test)]
 mod mock {
     use std::collections::VecDeque;
+
+    use crate::storage::buffer_manager::mock::MockBufferManager;
 
     use super::*;
 
@@ -329,7 +340,7 @@ mod mock {
     }
 
     impl Operator for MockVolcanoSourceOperator {
-        fn next(&mut self) -> Result<bool, BufferManagerError> {
+        fn next(&mut self) -> Result<bool, Box<dyn Error>> {
             if let Some(mut tuple) = self.tuples.pop_front() {
                 for i in 0..self.output.len() {
                     self.output[i].replace(tuple.values[i].take());
@@ -350,7 +361,7 @@ mod mock {
 mod test {
     use std::{rc::Rc, cell::RefCell};
 
-    use crate::{storage::{buffer_manager::mock::MockBufferManager, page::PAGE_SIZE}, access::{SlottedPageSegment, tuple::Tuple}, types::{TupleValue, TupleValueType}, execution::{plan::{PhysicalQueryPlan, PhysicalQueryPlanOperator, mock::MockTupleWriter}, engine::volcano_style::{Selection, ArithmeticExpression, Print}}, catalog::{AttributeDesc, TableDesc}};
+    use crate::{storage::{page::PAGE_SIZE, buffer_manager::mock::MockBufferManager}, access::{SlottedPageSegment, tuple::Tuple}, types::{TupleValue, TupleValueType}, execution::{plan::{PhysicalQueryPlan, PhysicalQueryPlanOperator, mock::MockTupleWriter}, engine::volcano_style::{Selection, ArithmeticExpression, Print}}, catalog::{AttributeDesc, TableDesc}};
 
     use super::{super::ExecutionEngine, Operator, mock::MockVolcanoSourceOperator, new_scan}; 
 

@@ -1,8 +1,8 @@
-use std::{sync::{Arc, Mutex, atomic::{Ordering, AtomicU64}}, collections::BTreeMap};
+use std::{sync::{Arc, atomic::{Ordering, AtomicU64}}, collections::BTreeMap};
 
 use parking_lot::RwLock;
 
-use crate::{access::{SlottedPageSegment, tuple::Tuple}, storage::{buffer_manager::{BufferManager, BufferManagerError}, page::SegmentId}, types::{TupleValueType, TupleValue, RelationTID}};
+use crate::{access::{SlottedPageSegment, tuple::Tuple}, storage::{buffer_manager::BufferManager, page::SegmentId}, types::{TupleValueType, TupleValue, RelationTID}};
 
 type DbObjectRef = u32;
 
@@ -52,10 +52,29 @@ impl TableDesc {
 }
 
 #[derive(Clone)]
-struct Catalog<B: BufferManager> {
+pub struct Catalog<B: BufferManager> {
     cache: Arc<CatalogCache<B>>,
 }
 
+impl<B: BufferManager> Catalog<B> {
+    pub fn new(buffer_manager: B) -> Catalog<B> {
+        Catalog {
+            cache: Arc::new(CatalogCache::new(buffer_manager))
+        }
+    }
+
+    pub fn find_table_by_name(&self, name: &str) -> Result<Option<TableDesc>, B::BError> {
+        self.cache.find_table_by_name(name)
+    }
+
+    pub fn create_table(&self, table: TableDesc) {
+        self.cache.create_table(table)
+    }
+
+    pub fn change_table_cardinality(&self, table_id: u32, delta: u64) -> Result<(), B::BError> {
+        self.cache.change_table_cardinality(table_id, delta)
+    }
+}
 
 struct CatalogCache<B:BufferManager> {
     bm: B,
@@ -77,7 +96,7 @@ impl<B: BufferManager> CatalogCache<B> {
         }
     }
 
-    fn find_table_by_name(&self, name: &str) -> Result<Option<TableDesc>, BufferManagerError> {
+    fn find_table_by_name(&self, name: &str) -> Result<Option<TableDesc>, B::BError> {
         if let Some(table_id) = self.table_name_index.read().get(name) {
             let (cached_table, cardinality) = &self.table_cache.read()[table_id];
             let mut table = cached_table.clone();
@@ -108,11 +127,23 @@ impl<B: BufferManager> CatalogCache<B> {
         }
     }
 
-    fn change_table_cardinality(&self, table_id: u32, delta: u64) -> Result<(), BufferManagerError> {
+    fn change_table_cardinality(&self, table_id: u32, delta: u64) -> Result<(), B::BError> {
         let table_cache = self.table_cache.read();
         let table = table_cache.get(&table_id).unwrap();
         table.1.fetch_add(delta, Ordering::SeqCst);
         Ok(())
+    }
+
+    fn create_table(&self, table: TableDesc) {
+        let mut table_cache = self.table_cache.write();
+        table_cache.insert(table.id, (table.clone(), AtomicU64::new(0)));
+        let db_object = DbObjectDesc { id: table.id, name: table.name.clone(), class_type: DbObjectType::Relation, segment_id: table.segment_id };
+        self.db_object_segment.insert_db_object(&db_object).unwrap();
+        for attribute in table.attributes {
+            self.attribute_segment.insert_attribute(attribute).unwrap();
+        }
+        let mut table_name_cache = self.table_name_index.write();
+        table_name_cache.insert(table.name.clone(), table.id);
     }
 }
 
@@ -210,7 +241,7 @@ impl<B: BufferManager> DbObjectCatalogSegment<B> {
         self.find_first_db_object(|db_object_desc| db_object_desc.class_type == obj_type && db_object_desc.name == name).map(|(_, d)| d)
     }
 
-    fn insert_db_object(&self, db_object: &DbObjectDesc) -> Result<(), BufferManagerError> {
+    fn insert_db_object(&self, db_object: &DbObjectDesc) -> Result<(), B::BError> {
         let tuple = Tuple::from(db_object);
         let mut data = vec![0; tuple.calculate_binary_length()];
         tuple.write_binary(&mut data);
@@ -218,7 +249,7 @@ impl<B: BufferManager> DbObjectCatalogSegment<B> {
         Ok(())
     }
 
-    fn update_db_object(&self, db_object: &DbObjectDesc) -> Result<(), BufferManagerError> {
+    fn update_db_object(&self, db_object: &DbObjectDesc) -> Result<(), B::BError> {
         let (tid, _) = self.find_first_db_object(|db_object_desc| db_object_desc.id == db_object.id).unwrap();
         let tuple = Tuple::from(db_object);
         let buffer: Box<[u8]> = tuple.into();
@@ -237,15 +268,16 @@ pub struct AttributeDesc {
     pub table_ref: DbObjectRef,
 }
 
+
 impl From<&[u8]> for AttributeDesc {
     fn from(value: &[u8]) -> Self {
         let parsed_tuple = Tuple::parse_binary(&vec![
             TupleValueType::Int, // db_object_id
             TupleValueType::Int, // id
             TupleValueType::VarChar(u16::MAX), // name
-            TupleValueType::Int, // length (where applicable, otherwhise don't care)
-            TupleValueType::SmallInt, // integrity_constraint_flags
             TupleValueType::SmallInt, // data_type
+            TupleValueType::SmallInt, // length (where applicable, otherwhise don't care)
+            TupleValueType::SmallInt, // integrity_constraint_flags
         ], value);
         let table_ref = match parsed_tuple.values[0] {
             Some(TupleValue::Int(id)) => id as u32,
@@ -292,9 +324,9 @@ impl From<&AttributeDesc> for Tuple {
             Some(TupleValue::Int(value.table_ref as i32)), // db_object_id
             Some(TupleValue::Int(value.id as i32)), // id
             Some(TupleValue::String(value.name.clone())), // name
-            Some(TupleValue::Int(length)), // length (where applicable, otherwhise don't care)
-            Some(TupleValue::SmallInt(integrity_constraint_flags)), // integrity_constraint_flags
             Some(TupleValue::SmallInt(data_type)), // data_type
+            Some(TupleValue::SmallInt(length as i16)), // length (where applicable, otherwhise don't care)
+            Some(TupleValue::SmallInt(integrity_constraint_flags)), // integrity_constraint_flags
         ])
     }
 }
@@ -332,7 +364,7 @@ impl<B: BufferManager> AttributeCatalogSegment<B> {
         }).next().map(|f| f.unwrap().1)
     }
 
-    fn insert_attribute(&self, attribute: AttributeDesc) -> Result<(), BufferManagerError> {
+    fn insert_attribute(&self, attribute: AttributeDesc) -> Result<(), B::BError> {
         let tuple = Tuple::from(&attribute);
         let mut data = vec![0; tuple.calculate_binary_length()];
         tuple.write_binary(&mut data);
@@ -340,7 +372,7 @@ impl<B: BufferManager> AttributeCatalogSegment<B> {
         Ok(())
     }
 
-    fn update_attribute(&self, attribute: AttributeDesc) -> Result<(), BufferManagerError> {
+    fn update_attribute(&self, attribute: AttributeDesc) -> Result<(), B::BError> {
         let (tid, _) = self.sp_segment.clone().scan(|data| {
             let attribute_desc = AttributeDesc::from(data);
             if attribute_desc.id == attribute.id {
