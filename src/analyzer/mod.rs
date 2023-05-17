@@ -2,7 +2,7 @@ use std::{fmt::{Display, Debug}, collections::BTreeMap, error::Error};
 
 use itertools::{Itertools, join};
 
-use crate::{storage::buffer_manager::BufferManager, catalog::Catalog, planner::{Query, BoundTable, BoundAttribute}, parser::{ParseTree, SelectParseTree, ParseWhereClause, ParseWhereClauseItem, BoundParseAttribute}, execution::plan, types::TupleValue};
+use crate::{storage::buffer_manager::BufferManager, catalog::Catalog, planner::{Query, BoundTable, BoundAttribute, Selection, SelectionOperator}, parser::{ParseTree, SelectParseTree, ParseWhereClause, ParseWhereClauseItem, BoundParseAttribute}, execution::plan, types::TupleValue};
 
 #[derive(Debug)]
 pub enum AnalyzerError<B: BufferManager> {
@@ -56,10 +56,17 @@ impl<B: BufferManager> Analyzer<B> {
             }
         }
         let mut select = Vec::new();
-        for parse_attribute in select_tree.columns {
-            select.push(Self::find_bound_attribute(&parse_attribute, &tables)?);
+        if let Some(parse_attributes) = select_tree.columns {
+            for parse_attribute in parse_attributes {
+                select.push(Self::find_bound_attribute(&parse_attribute, &tables)?);
+            }
+        } else {
+            for table in &tables {
+                for attribute in &table.table.attributes {
+                    select.push(BoundAttribute { attribute: attribute.clone(), binding: table.binding.clone() });
+                }
+            }
         }
-
         let (selections, join_predicates) = if let Some(where_clause) = select_tree.where_clause {
             Self::analyze_where(&where_clause, &tables)?
         } else {
@@ -83,7 +90,7 @@ impl<B: BufferManager> Analyzer<B> {
 
     // The signature of that function is just temporary since as long as we only allow equals predicates
     // It's enough to store what should be equal to what
-    fn analyze_where(where_clause: &ParseWhereClause, from_tables: &[BoundTable]) -> Result<(Vec<(BoundAttribute, TupleValue)>, Vec<(BoundAttribute, BoundAttribute)>), AnalyzerError<B>> {
+    fn analyze_where(where_clause: &ParseWhereClause, from_tables: &[BoundTable]) -> Result<(Vec<Selection>, Vec<(BoundAttribute, BoundAttribute)>), AnalyzerError<B>> {
         let mut selections = Vec::new();
         let mut join_predicates = Vec::new();
 
@@ -93,7 +100,7 @@ impl<B: BufferManager> Analyzer<B> {
     }
 
     fn analyze_where_rec(where_clause: &ParseWhereClause, 
-                        selections: &mut Vec<(BoundAttribute, TupleValue)>, 
+                        selections: &mut Vec<Selection>, 
                         join_predicates: &mut Vec<(BoundAttribute, BoundAttribute)>, 
                         from_tables: &[BoundTable]) -> Result<(), AnalyzerError<B>> {
         match where_clause {
@@ -117,13 +124,46 @@ impl<B: BufferManager> Analyzer<B> {
                         ParseWhereClauseItem::Value(_) => return Err(AnalyzerError::UnimplementedError("literal = literal comparisons currentlly unimplemented".to_string())),
                     },
                 };
-                selections.push((Self::find_bound_attribute(l, from_tables)?, r.clone()))
+                let selection = Selection {
+                    attribute: Self::find_bound_attribute(l, from_tables)?,
+                    value: r.clone(),
+                    operator: SelectionOperator::Eq
+                };
+                selections.push(selection)
             },
             ParseWhereClause::NotEquals(_, _) => return Err(AnalyzerError::UnimplementedError("Not equals unimplemented".to_string())),
-            ParseWhereClause::LessThan(_, _) => return Err(AnalyzerError::UnimplementedError("Less than unimplemented".to_string())),
-            ParseWhereClause::GreaterThan(_, _) => return Err(AnalyzerError::UnimplementedError("Greater than unimplemented".to_string())),
-            ParseWhereClause::LessOrEqualThan(_, _) => return Err(AnalyzerError::UnimplementedError("Less than or equal unimplemented".to_string())),
-            ParseWhereClause::GreaterOrEqualThan(_, _) => return Err(AnalyzerError::UnimplementedError("Greater than or equal unimplemented".to_string())),
+            ParseWhereClause::LessThan(l, r) 
+            | ParseWhereClause::GreaterThan(r, l) 
+            | ParseWhereClause::LessOrEqualThan(l, r)
+            | ParseWhereClause::GreaterOrEqualThan(r, l)
+             => {
+                let (l, r) = match l {
+                    ParseWhereClauseItem::Name(n1) => match r {
+                        ParseWhereClauseItem::Name(n2) => return Err(AnalyzerError::UnimplementedError("Non-equijoins unimplemented".to_string())),
+                        ParseWhereClauseItem::Value(v) => {
+                            (n1, v)
+                        },
+                    },
+                    ParseWhereClauseItem::Value(v) => match r {
+                        ParseWhereClauseItem::Name(n) => {
+                            (n, v)
+                        },
+                        ParseWhereClauseItem::Value(_) => return Err(AnalyzerError::UnimplementedError("literal = literal comparisons currentlly unimplemented".to_string())),
+                    },
+                };
+                let selection = Selection {
+                    attribute: Self::find_bound_attribute(l, from_tables)?,
+                    value: r.clone(),
+                    operator: match where_clause {
+                        ParseWhereClause::LessThan(_, _) => SelectionOperator::LessThan,
+                        ParseWhereClause::GreaterThan(_, _) => SelectionOperator::GreaterThan,
+                        ParseWhereClause::LessOrEqualThan(_, _) => SelectionOperator::LessThanOrEq,
+                        ParseWhereClause::GreaterOrEqualThan(_, _) => SelectionOperator::GreaterThanOrEq,
+                        _ => unreachable!()
+                    }
+                };
+                selections.push(selection)
+            },
             ParseWhereClause::And(l, r) => todo!(),
             ParseWhereClause::Or(_, _) => return Err(AnalyzerError::UnimplementedError("Or unimplemented".to_string())),
         }
@@ -137,10 +177,12 @@ impl<B: BufferManager> Analyzer<B> {
                 .filter(|t| t.binding == binding)
                 .filter_map(|t| t.table.get_attribute_by_name(parse_attribute.name))
                 .exactly_one();
-            if let Ok(found_attributes) = found_attributes {
-                found_attributes
-            } else {
-                return Err(AnalyzerError::AmbiguousAttributeName(parse_attribute.name.to_string()))
+            match found_attributes {
+                Ok(attribute) => attribute,
+                Err(e) => match e.count() {
+                    0 => return Err(AnalyzerError::AttributeNotFoundError(parse_attribute.name.to_string())),
+                    _ => return Err(AnalyzerError::AmbiguousAttributeName(parse_attribute.name.to_string()))
+                }
             }
         };
         Ok(BoundAttribute { attribute: attribute.clone(), binding: binding })
@@ -148,3 +190,79 @@ impl<B: BufferManager> Analyzer<B> {
 
 }
 
+#[cfg(test)]
+mod test {
+
+    use std::sync::Arc;
+
+    use crate::{storage::{buffer_manager::mock::MockBufferManager, page::PAGE_SIZE}, catalog::{TableDesc, AttributeDesc}, types::TupleValueType, parser::BoundParseTable, planner::BoundTableRef};
+
+    use super::*;
+
+    fn get_catalog(bm: Arc<MockBufferManager>) -> Catalog<Arc<MockBufferManager>> {
+        let catalog = Catalog::new(bm);
+        catalog.create_table(TableDesc{
+                id: 1, 
+                name: "people".to_string(), 
+                segment_id: 1024, 
+                attributes: vec![
+                    AttributeDesc{
+                        id: 1,
+                        name: "id".to_string(), 
+                        data_type: TupleValueType::Int, 
+                        nullable: false, 
+                        table_ref: 1
+                    },
+                    AttributeDesc{
+                        id: 2,
+                        name: "name".to_string(), 
+                        data_type: TupleValueType::VarChar(255), 
+                        nullable: false, 
+                        table_ref: 1
+                    },
+                    AttributeDesc{
+                        id: 3,
+                        name: "age".to_string(), 
+                        data_type: TupleValueType::SmallInt, 
+                        nullable: true, 
+                        table_ref: 1
+                    }
+                ],
+                cardinality: 0, // Irrelevant for analyzer tests
+            });
+            catalog
+    }
+
+    #[test]
+    fn test_analyze_select_no_where() {
+        let catalog = get_catalog(MockBufferManager::new(PAGE_SIZE));
+        let analyzer = Analyzer::new(catalog);
+        let parse_tree = ParseTree::Select(SelectParseTree {
+            columns: Some(vec![
+                BoundParseAttribute {
+                    name: "id",
+                    binding: None
+                },
+            ]),
+            from_tables: vec![
+                BoundParseTable {
+                    name: "people",
+                    binding: None
+                }
+            ],
+            where_clause: None
+        });
+        let query = analyzer.analyze(parse_tree).unwrap();
+        assert_eq!(query.select.len(), 1);
+        assert_eq!(query.select[0].attribute.name, "id");
+        assert_eq!(query.select[0].attribute.id, 1);
+        assert_eq!(query.select[0].attribute.table_ref, 1);
+        assert_eq!(query.select[0].binding, None);
+        assert_eq!(query.from.len(), 1);
+        assert_eq!(query.from[&BoundTableRef { table_ref: 1, binding: None }].table.id, 1);
+        assert_eq!(query.from[&BoundTableRef { table_ref: 1, binding: None }].table.name, "people");
+        assert_eq!(query.from[&BoundTableRef { table_ref: 1, binding: None }].binding, None);
+        assert_eq!(query.join_predicates.len(), 0);
+        assert_eq!(query.selections.len(), 0);
+    }
+}

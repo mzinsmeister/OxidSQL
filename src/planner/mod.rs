@@ -37,7 +37,7 @@ pub struct BoundTableRef {
     pub binding: Option<String>
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct BoundAttribute {
     pub attribute: AttributeDesc,
     pub binding: Option<String>
@@ -68,7 +68,7 @@ impl BoundAttribute {
     }
 }
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BoundAttributeRef {
     pub attribute_ref: u32,
     pub table_ref: u32,
@@ -87,8 +87,24 @@ impl BoundAttributeRef {
 pub struct Query {
     pub select: Vec<BoundAttribute>,
     pub from: BTreeMap<BoundTableRef, BoundTable>,
-    pub selections: Vec<(BoundAttribute, TupleValue)>,
+    pub selections: Vec<Selection>,
     pub join_predicates: Vec<(BoundAttribute, BoundAttribute)>,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum SelectionOperator {
+    Eq,
+    LessThan,
+    LessThanOrEq,
+    GreaterThan,
+    GreaterThanOrEq
+}
+
+#[derive(Debug, Clone)]
+pub struct Selection {
+    pub attribute: BoundAttribute,
+    pub value: TupleValue,
+    pub operator: SelectionOperator
 }
 
 pub trait Planner {

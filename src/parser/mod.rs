@@ -42,7 +42,7 @@ impl<'a> BoundParseAttribute<'a> {
         BoundParseAttribute { name, binding }
     }
 
-    pub fn new_bound(name: &'a str, binding: &'a str) -> BoundParseAttribute<'a> {
+    pub fn new_bound(binding: &'a str, name: &'a str) -> BoundParseAttribute<'a> {
         BoundParseAttribute { name, binding: Some(binding) }
     }
 
@@ -93,7 +93,7 @@ impl Display for BoundParseTable<'_> {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct SelectParseTree<'a> {
-    pub columns: Vec<BoundParseAttribute<'a>>,
+    pub columns: Option<Vec<BoundParseAttribute<'a>>>,
     pub from_tables: Vec<BoundParseTable<'a>>,
     pub where_clause: Option<ParseWhereClause<'a>>
 }
@@ -123,7 +123,7 @@ pub fn parse_query<'a>(query: &'a str) -> IResult<&'a str, ParseTree> {
 fn parse_select(rest_query: &str) -> IResult<&str, ParseTree> {
     let (rest_query, _) = tag_no_case("SELECT")(rest_query)?;
     let (rest_query, _) = multispace1(rest_query)?;
-    let (rest_query, select) = parse_sql_bound_attribute_list(rest_query)?;
+    let (rest_query, select) = alt((parse_sql_star, parse_sql_bound_attribute_list))(rest_query)?;
     let (rest_query, _) = tag_no_case("FROM")(rest_query)?;
     let (rest_query, _) = multispace1(rest_query)?;
     let (rest_query, from) = parse_sql_from_list(rest_query)?;
@@ -131,11 +131,17 @@ fn parse_select(rest_query: &str) -> IResult<&str, ParseTree> {
     Ok(("", ParseTree::Select(SelectParseTree { columns: select, from_tables: from, where_clause })))
 }
 
-fn parse_sql_bound_attribute_list(rest_query: &str) -> IResult<&str, Vec<BoundParseAttribute>> {
+fn parse_sql_star(rest_query: & str) -> IResult<&str, Option<Vec<BoundParseAttribute>>> {
+    let (rest_query, _) = tag("*")(rest_query)?;
+    let (rest_query, _) = multispace0(rest_query)?;
+    Ok((rest_query, None))
+}
+
+fn parse_sql_bound_attribute_list(rest_query: &str) -> IResult<&str, Option<Vec<BoundParseAttribute>>> {
     let (rest_query, list) =
         separated_list1(parse_sql_list_separator, parse_sql_bound_attribute)(rest_query)?;
     let (rest_query, _) = multispace0(rest_query)?;
-    Ok((rest_query, list))
+    Ok((rest_query, Some(list)))
 }
 
 fn parse_sql_bound_attribute(rest_query: & str) -> IResult<&str, BoundParseAttribute> {
@@ -233,7 +239,7 @@ fn parse_comparison_where_clause(rest_query: &str) -> IResult<&str, ParseWhereCl
 fn parse_comp_operator(rest_query: &str) -> IResult<&str, &str> {
     let (rest_query, _) = multispace0(rest_query)?;
     let (rest_query, operator) = alt((
-        tag("="), tag("<"), tag("<="), tag(">"), tag(">="), tag("<>")))(rest_query)?;
+        tag("="), tag("<="), tag(">="), tag("<>"), tag("<"), tag(">")))(rest_query)?;
     let (rest_query, _) = multispace0(rest_query)?;
     Ok((rest_query, operator))
 }
@@ -409,7 +415,18 @@ mod test {
         let query = "SELECT a, b FROM test";
 
         test_parse(query, ParseTree::Select(SelectParseTree {
-            columns: vec![BoundParseAttribute::new_unbound("a"), BoundParseAttribute::new_unbound("b")],
+            columns: Some(vec![BoundParseAttribute::new_unbound("a"), BoundParseAttribute::new_unbound("b")]),
+            from_tables: vec![BoundParseTable::new_unbound("test")],
+            where_clause: None
+        }));
+    }
+
+    #[test]
+    fn test_simple_select_star() {
+        let query = "SELECT * FROM test";
+
+        test_parse(query, ParseTree::Select(SelectParseTree {
+            columns: None,
             from_tables: vec![BoundParseTable::new_unbound("test")],
             where_clause: None
         }));
@@ -420,11 +437,11 @@ mod test {
         let query = "SELECT a, b FROM test t where t.c = 5";
 
         test_parse(query, ParseTree::Select(SelectParseTree {
-            columns: vec![BoundParseAttribute::new_unbound("a"), BoundParseAttribute::new_unbound("b")],
+            columns: Some(vec![BoundParseAttribute::new_unbound("a"), BoundParseAttribute::new_unbound("b")]),
             from_tables: vec![BoundParseTable::new_bound("test", "t")],
             where_clause: Some(
                 ParseWhereClause::Equals(
-                    ParseWhereClauseItem::Name(BoundParseAttribute::new_bound("c", "t")), 
+                    ParseWhereClauseItem::Name(BoundParseAttribute::new_bound("t", "c")), 
                     ParseWhereClauseItem::Value(TupleValue::BigInt(5))
                 )
             )
@@ -432,11 +449,103 @@ mod test {
     }
 
     #[test]
+    fn test_simple_select_with_where_less_equals() {
+        let query = "SELECT a, b FROM test t where t.c <= 5";
+
+        test_parse(query, ParseTree::Select(SelectParseTree {
+            columns: Some(vec![BoundParseAttribute::new_unbound("a"), BoundParseAttribute::new_unbound("b")]),
+            from_tables: vec![BoundParseTable::new_bound("test", "t")],
+            where_clause: Some(
+                ParseWhereClause::LessOrEqualThan(
+                    ParseWhereClauseItem::Name(BoundParseAttribute::new_bound("t", "c")), 
+                    ParseWhereClauseItem::Value(TupleValue::BigInt(5))
+                )
+            )
+        }));
+    }
+
+    #[test]
+    fn test_simple_select_with_where_greater_equals() {
+        let query = "SELECT a, b FROM test t where t.c >= 5";
+
+        test_parse(query, ParseTree::Select(SelectParseTree {
+            columns: Some(vec![BoundParseAttribute::new_unbound("a"), BoundParseAttribute::new_unbound("b")]),
+            from_tables: vec![BoundParseTable::new_bound("test", "t")],
+            where_clause: Some(
+                ParseWhereClause::GreaterOrEqualThan(
+                    ParseWhereClauseItem::Name(BoundParseAttribute::new_bound("t", "c")), 
+                    ParseWhereClauseItem::Value(TupleValue::BigInt(5))
+                )
+            )
+        }));
+    }
+
+    #[test]
+    fn test_simple_select_with_where_greater() {
+        let query = "SELECT a, b FROM test t where t.c > 5";
+
+        test_parse(query, ParseTree::Select(SelectParseTree {
+            columns: Some(vec![BoundParseAttribute::new_unbound("a"), BoundParseAttribute::new_unbound("b")]),
+            from_tables: vec![BoundParseTable::new_bound("test", "t")],
+            where_clause: Some(
+                ParseWhereClause::GreaterThan(
+                    ParseWhereClauseItem::Name(BoundParseAttribute::new_bound("t", "c")), 
+                    ParseWhereClauseItem::Value(TupleValue::BigInt(5))
+                )
+            )
+        }));
+    }
+
+    #[test]
+    fn test_simple_select_with_where_less() {
+        let query = "SELECT a, b FROM test t where t.c < 5";
+
+        test_parse(query, ParseTree::Select(SelectParseTree {
+            columns: Some(vec![BoundParseAttribute::new_unbound("a"), BoundParseAttribute::new_unbound("b")]),
+            from_tables: vec![BoundParseTable::new_bound("test", "t")],
+            where_clause: Some(
+                ParseWhereClause::LessThan(
+                    ParseWhereClauseItem::Name(BoundParseAttribute::new_bound("t", "c")), 
+                    ParseWhereClauseItem::Value(TupleValue::BigInt(5))
+                )
+            )
+        }));
+    }
+
+
+    #[test]
+    fn test_simple_select_with_where_and() {
+        let query = "SELECT a, b FROM test t where t.c < 5 and t.a = 'abc'";
+
+        test_parse(query, ParseTree::Select(SelectParseTree {
+            columns: Some(vec![BoundParseAttribute::new_unbound("a"), BoundParseAttribute::new_unbound("b")]),
+            from_tables: vec![BoundParseTable::new_bound("test", "t")],
+            where_clause: Some(
+                ParseWhereClause::And(
+                    Box::new(
+                        ParseWhereClause::LessThan(
+                            ParseWhereClauseItem::Name(BoundParseAttribute::new_bound("t", "c")), 
+                            ParseWhereClauseItem::Value(TupleValue::BigInt(5))
+                        )
+                    ),
+                    Box::new(
+                        ParseWhereClause::Equals(
+                            ParseWhereClauseItem::Name(BoundParseAttribute::new_bound("t", "a")), 
+                            ParseWhereClauseItem::Value(TupleValue::String(String::from("abc")))
+                        )
+                    )
+                )
+            )
+        }));
+    }
+
+
+    #[test]
     fn test_simple_select_with_where_mixed_case() {
         let query = "SEleCT a, b frOm test where c = 5";
 
         test_parse(query, ParseTree::Select(SelectParseTree {
-            columns: vec![BoundParseAttribute::new_unbound("a"), BoundParseAttribute::new_unbound("b")],
+            columns: Some(vec![BoundParseAttribute::new_unbound("a"), BoundParseAttribute::new_unbound("b")]),
             from_tables: vec![BoundParseTable::new_unbound("test")],
             where_clause: Some(
                 ParseWhereClause::Equals(

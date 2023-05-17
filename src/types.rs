@@ -138,3 +138,62 @@ impl Display for TupleValue {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tuple_value_eq() {
+        // Numeric comparisons
+        assert_eq!(TupleValue::BigInt(10), TupleValue::BigInt(10));
+        assert_eq!(TupleValue::Int(5), TupleValue::Int(5));
+        assert_eq!(TupleValue::SmallInt(2), TupleValue::SmallInt(2));
+        assert_eq!(TupleValue::BigInt(10), TupleValue::Int(10));
+        assert_eq!(TupleValue::BigInt(10), TupleValue::SmallInt(10));
+        assert_eq!(TupleValue::Int(5), TupleValue::BigInt(5));
+        assert_eq!(TupleValue::Int(5), TupleValue::SmallInt(5));
+        assert_eq!(TupleValue::SmallInt(2), TupleValue::BigInt(2));
+        assert_eq!(TupleValue::SmallInt(2), TupleValue::Int(2));
+
+        // String comparisons
+        assert_eq!(TupleValue::String("hello".to_string()), TupleValue::String("hello".to_string()));
+        assert_ne!(TupleValue::String("hello".to_string()), TupleValue::String("world".to_string()));
+
+        // Non-equal comparisons
+        assert_ne!(TupleValue::BigInt(10), TupleValue::BigInt(20));
+        assert_ne!(TupleValue::Int(5), TupleValue::Int(10));
+        assert_ne!(TupleValue::SmallInt(2), TupleValue::SmallInt(5));
+        assert_ne!(TupleValue::BigInt(10), TupleValue::Int(20));
+        assert_ne!(TupleValue::BigInt(10), TupleValue::SmallInt(20));
+        assert_ne!(TupleValue::Int(5), TupleValue::BigInt(10));
+        assert_ne!(TupleValue::Int(5), TupleValue::SmallInt(10));
+        assert_ne!(TupleValue::SmallInt(2), TupleValue::BigInt(5));
+        assert_ne!(TupleValue::SmallInt(2), TupleValue::Int(5));
+        assert_ne!(TupleValue::String("hello".to_string()), TupleValue::String("world".to_string()));
+    }
+
+    #[test]
+    fn test_tuple_value_partial_cmp() {
+        // Numeric comparisons
+        assert_eq!(TupleValue::BigInt(10).partial_cmp(&TupleValue::BigInt(10)), Some(std::cmp::Ordering::Equal));
+        assert_eq!(TupleValue::Int(5).partial_cmp(&TupleValue::Int(5)), Some(std::cmp::Ordering::Equal));
+        assert_eq!(TupleValue::SmallInt(2).partial_cmp(&TupleValue::SmallInt(2)), Some(std::cmp::Ordering::Equal));
+        assert_eq!(TupleValue::BigInt(10).partial_cmp(&TupleValue::Int(10)), Some(std::cmp::Ordering::Equal));
+        assert_eq!(TupleValue::BigInt(10).partial_cmp(&TupleValue::SmallInt(10)), Some(std::cmp::Ordering::Equal));
+        assert_eq!(TupleValue::Int(5).partial_cmp(&TupleValue::BigInt(5)), Some(std::cmp::Ordering::Equal));
+        assert_eq!(TupleValue::Int(5).partial_cmp(&TupleValue::SmallInt(5)), Some(std::cmp::Ordering::Equal));
+        assert_eq!(TupleValue::SmallInt(2).partial_cmp(&TupleValue::BigInt(2)), Some(std::cmp::Ordering::Equal));
+        assert_eq!(TupleValue::SmallInt(2).partial_cmp(&TupleValue::Int(2)), Some(std::cmp::Ordering::Equal));
+
+        // String comparisons
+        assert_eq!(TupleValue::String("hello".to_string()).partial_cmp(&TupleValue::String("hello".to_string())), Some(std::cmp::Ordering::Equal));
+        assert_eq!(TupleValue::String("hello".to_string()).partial_cmp(&TupleValue::String("world".to_string())), Some(std::cmp::Ordering::Less));
+        assert_eq!(TupleValue::String("world".to_string()).partial_cmp(&TupleValue::String("hello".to_string())), Some(std::cmp::Ordering::Greater));
+
+        // Non-comparable types
+        assert_eq!(TupleValue::BigInt(10).partial_cmp(&TupleValue::String("hello".to_string())), None);
+        assert_eq!(TupleValue::String("hello".to_string()).partial_cmp(&TupleValue::BigInt(10)), None);
+    }
+}
+

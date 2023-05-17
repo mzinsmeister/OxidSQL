@@ -68,7 +68,19 @@ impl ArithmeticExpression {
 pub enum BooleanExpression {
     And(Box<BooleanExpression>, Box<BooleanExpression>),
     //Or(Box<BooleanExpression>, Box<BooleanExpression>),
-    Eq(ArithmeticExpression, ArithmeticExpression)
+    Eq(ArithmeticExpression, ArithmeticExpression),
+    LessThan(ArithmeticExpression, ArithmeticExpression),
+    LessThanOrEq(ArithmeticExpression, ArithmeticExpression),
+}
+
+#[inline(always)]
+fn compare_tuple_value_options<F>(cmp: F, v1: &Option<TupleValue>, v2: &Option<TupleValue>) -> bool
+    where F: Fn(&TupleValue, &TupleValue) -> bool {
+    match (v1, v2) {
+        (Some(v1), Some(v2)) => cmp(v1, v2),
+        (None, None) => true,
+        _ => false
+    }
 }
 
 impl BooleanExpression {
@@ -80,7 +92,15 @@ impl BooleanExpression {
                 },
             BooleanExpression::Eq
                 (left, right) => {
-                    left.evaluate() == right.evaluate()
+                    compare_tuple_value_options(|v1, v2| v1 == v2, &left.evaluate(), &right.evaluate())
+                },
+            BooleanExpression::LessThan
+                (left, right) => {
+                    compare_tuple_value_options(|v1, v2| v1 < v2, &left.evaluate(), &right.evaluate())
+                },
+            BooleanExpression::LessThanOrEq
+                (left, right) => {
+                    compare_tuple_value_options(|v1, v2| v1 <= v2, &left.evaluate(), &right.evaluate())
                 },
         }
     }
@@ -267,6 +287,16 @@ impl Engine {
                 let left_conv = Engine::convert_arith_expression_to_volcano_style(left, input_registers);
                 let right_conv = Engine::convert_arith_expression_to_volcano_style(right, input_registers);
                 BooleanExpression::Eq(left_conv, right_conv)
+            },
+            plan::BooleanExpression::LessThan(left, right) => {
+                let left_conv = Engine::convert_arith_expression_to_volcano_style(left, input_registers);
+                let right_conv = Engine::convert_arith_expression_to_volcano_style(right, input_registers);
+                BooleanExpression::LessThan(left_conv, right_conv)
+            },
+            plan::BooleanExpression::LessThanOrEq(left, right) => {
+                let left_conv = Engine::convert_arith_expression_to_volcano_style(left, input_registers);
+                let right_conv = Engine::convert_arith_expression_to_volcano_style(right, input_registers);
+                BooleanExpression::LessThanOrEq(left_conv, right_conv)
             },
         }
     }

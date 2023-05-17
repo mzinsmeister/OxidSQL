@@ -112,7 +112,10 @@ pub enum BooleanExpression {
     And(Box<BooleanExpression>, Box<BooleanExpression>),
     //Or(Box<BooleanExpression>, Box<BooleanExpression>),
     //Not(Box<BooleanExpression>),
-    Eq(ArithmeticExpression, ArithmeticExpression)
+    Eq(ArithmeticExpression, ArithmeticExpression),
+    // > or >= is unnecessary because we can just swap the operands
+    LessThan(ArithmeticExpression, ArithmeticExpression),
+    LessThanOrEq(ArithmeticExpression, ArithmeticExpression),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -24,7 +24,7 @@ fn main() {
     println!("OxidSQL - Rusty SQL Database");
 
     let args: Vec<String> = env::args().collect();
-    let path = if args.len() > 0 {
+    let path = if args.len() > 1 {
         PathBuf::from(&args[1])
     } else {
         PathBuf::from("./data")
@@ -40,7 +40,7 @@ fn main() {
 
     let mut rl = DefaultEditor::new().unwrap();
     loop {
-        let readline = rl.readline("oxidsql> ");
+        let readline = rl.readline("OxidSQL> ");
         match readline {
             Ok(line) => {
                 rl.add_history_entry(line.as_str()).unwrap();

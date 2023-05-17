@@ -7,7 +7,7 @@ use std::{collections::BTreeMap};
 
 use crate::{execution::{plan::{PhysicalQueryPlan, self, PhysicalQueryPlanOperator, StdOutTupleWriter}}, optimizer::{query_graph::QueryGraph, optimizer::{run_dp_ccp, OptimizerResult}}, types::TupleValue, planner::BoundTableRef};
 
-use super::{Planner, Query, PlannerError, BoundAttribute};
+use super::{Planner, Query, PlannerError, BoundAttribute, SelectionOperator};
 
 pub struct BottomUpPlanner {}
 
@@ -67,15 +67,20 @@ fn prepare_query_graph(query: &Query) -> QueryGraph {
             table: relation.table.clone()
         };
         let mut predicate = None;
-        for (attribute_id, value) in relation_predicates.get(relation_id).unwrap_or(&Vec::new()) {
+        for (attribute_id, value, operator) in relation_predicates.get(relation_id).unwrap_or(&Vec::new()) {
             let column_index = relation.table.get_attribute_index_by_id(*attribute_id).unwrap();
-            let eq = plan::BooleanExpression::Eq(
-                plan::ArithmeticExpression::Column(column_index), 
-                plan::ArithmeticExpression::Literal(value.clone().unwrap())
-            );
+            let o1 = plan::ArithmeticExpression::Column(column_index);
+            let o2 = plan::ArithmeticExpression::Literal(value.clone().unwrap());
+            let cmp = match operator {
+                SelectionOperator::Eq => plan::BooleanExpression::Eq(o1, o2),
+                SelectionOperator::LessThan => plan::BooleanExpression::LessThan(o1, o2),
+                SelectionOperator::LessThanOrEq => plan::BooleanExpression::LessThanOrEq(o1, o2),
+                SelectionOperator::GreaterThan => plan::BooleanExpression::LessThan(o2, o1),
+                SelectionOperator::GreaterThanOrEq => plan::BooleanExpression::LessThanOrEq(o2, o1),
+            };
             predicate = match predicate {
-                None => Some(eq),
-                Some(p) => Some(plan::BooleanExpression::And(Box::new(p), Box::new(eq)))
+                None => Some(cmp),
+                Some(p) => Some(plan::BooleanExpression::And(Box::new(p), Box::new(cmp)))
             }
         }
         let plan = if let Some(predicate) = predicate {
@@ -98,17 +103,17 @@ fn prepare_query_graph(query: &Query) -> QueryGraph {
     query_graph
 }
 
-fn get_cardinality_estimates(query: &Query) -> (BTreeMap<BoundTableRef, u64>, BTreeMap<BoundTableRef, Vec<(u32, Option<TupleValue>)>>) {
+fn get_cardinality_estimates(query: &Query) -> (BTreeMap<BoundTableRef, u64>, BTreeMap<BoundTableRef, Vec<(u32, Option<TupleValue>, SelectionOperator)>>) {
     let mut relation_cardinalities = BTreeMap::new();
-    let mut relation_predicates: BTreeMap<BoundTableRef, Vec<(u32, Option<TupleValue>)>> = BTreeMap::new();
+    let mut relation_predicates: BTreeMap<BoundTableRef, Vec<(u32, Option<TupleValue>, SelectionOperator)>> = BTreeMap::new();
     for (_, relation) in &query.from {
         relation_cardinalities.insert(relation.to_ref(), relation.table.cardinality);
     }
-    for (attribute, value) in &query.selections {
-        relation_cardinalities.insert(attribute.get_table_ref(), 1); // Assume uniqueness for now
-        relation_predicates.entry(attribute.get_table_ref())
+    for selection in &query.selections {
+        relation_cardinalities.insert(selection.attribute.get_table_ref(), 1); // Assume uniqueness for now (With </<=/>/>= this is just plain wrong)
+        relation_predicates.entry(selection.attribute.get_table_ref())
             .or_insert_with(Vec::new)
-            .push((attribute.attribute.id, Some(value.clone())));
+            .push((selection.attribute.attribute.id, Some(selection.value.clone()), selection.operator));
     }
     (relation_cardinalities, relation_predicates)
 }
