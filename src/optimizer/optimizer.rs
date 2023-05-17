@@ -50,6 +50,7 @@ impl DpJoinRepresentation {
 /*
     TODO: Refactor. Implement iterators for connected subraphs and 
           complements instead of returing a vector.
+          Also use some kind of bit set to enable faster set operations.
           Also implement DPhyp to support non-inner joins.
  */
 
