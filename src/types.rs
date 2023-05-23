@@ -37,12 +37,46 @@ pub enum TupleValueType {
 }
 
 impl TupleValueType {
-    pub fn get_size(&self) -> Option<usize> {
+    pub fn get_fixed_size(&self) -> Option<usize> {
         match self {
             TupleValueType::BigInt => Some(8),
             TupleValueType::VarChar(_) => None,
             TupleValueType::Int => Some(4),
             TupleValueType::SmallInt => Some(2)
+        }
+    }
+
+    pub fn is_comparable_to(&self, other: &TupleValueType) -> bool {
+        match self {
+            TupleValueType::BigInt 
+            | TupleValueType::Int 
+            | TupleValueType::SmallInt => match other {
+                TupleValueType::BigInt
+                | TupleValueType::Int
+                | TupleValueType::SmallInt => true,
+                _ => false
+            },
+            TupleValueType::VarChar(_) => match other {
+                TupleValueType::VarChar(_) => true,
+                _ => false
+            },
+        }
+    }
+
+    pub fn is_comparable_to_value(&self, value: &TupleValue) -> bool {
+        match self {
+            TupleValueType::BigInt 
+            | TupleValueType::Int 
+            | TupleValueType::SmallInt => match value {
+                TupleValue::BigInt(_)
+                | TupleValue::Int(_)
+                | TupleValue::SmallInt(_) => true,
+                _ => false
+            },
+            TupleValueType::VarChar(_) => match value {
+                TupleValue::String(_) => true,
+                _ => false
+            },
         }
     }
 }
