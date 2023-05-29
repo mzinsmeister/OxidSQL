@@ -1,6 +1,6 @@
 use std::{fs::{File, metadata}, path::PathBuf, sync::Arc, collections::HashMap, fmt::Debug};
 
-use super::page::{PAGE_SIZE, PageId, RelationIdType, SegmentId};
+use super::page::{PAGE_SIZE, PageId, SegmentId};
 
 #[cfg(test)]
 use mockall::{automock};
@@ -9,10 +9,10 @@ use parking_lot::RwLock;
 
 #[cfg_attr(test, automock)]
 pub trait StorageManager: Debug + Sync + Send {
-  fn create_segment(&self, segment_id: RelationIdType);
+  fn create_segment(&self, segment_id: SegmentId);
   fn read_page(&self, page_id: PageId, buf: &mut[u8]) -> Result<(), std::io::Error>;
   fn write_page(&self, page_id: PageId, buf: &[u8]) -> Result<(), std::io::Error>;
-  fn get_relation_size(&self, segment_id: RelationIdType) -> u64;
+  fn get_relation_size(&self, segment_id: SegmentId) -> u64;
 }
 
 
@@ -44,7 +44,7 @@ enum AccessType {
 
 impl DiskManager {
   #[cfg(unix)]
-  fn open_file(&self, segment_id: RelationIdType, access: AccessType) -> File {
+  fn open_file(&self, segment_id: SegmentId, access: AccessType) -> File {
     use std::os::unix::prelude::OpenOptionsExt;
 
     let file = self.file_cache.read().get(&segment_id).map(|f| f.try_clone());
@@ -99,7 +99,7 @@ impl DiskManager {
 
 impl StorageManager for DiskManager {
 
-  fn create_segment(&self, segment_id: RelationIdType) {
+  fn create_segment(&self, segment_id: SegmentId) {
     File::create(self.data_folder.join(segment_id.to_string())).unwrap();
   }
 
@@ -143,7 +143,7 @@ impl StorageManager for DiskManager {
     Ok(())
   }
 
-  fn get_relation_size(&self, segment_id: RelationIdType) -> u64 {
+  fn get_relation_size(&self, segment_id: SegmentId) -> u64 {
     //TODO: It would be better to return 0 if the file doesn't exist instead of creating it
     let path = self.data_folder.join(segment_id.to_string());
     if path.is_file(){

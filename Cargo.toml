@@ -14,11 +14,13 @@ libc = "0.2.139"
 parking_lot = { version = "0.12.1", features = ["arc_lock"] }
 nom = "^7"
 rustyline = "11.0.0"
+zerocopy = "0.6.1"
+ahash = "0.8.3"
+atomic = "0.5.3"
 
 [dev-dependencies]
 tempfile = "3"
 mockall = "0.11.3"
-rand = "0.8.5"
 
 [features]
 "allow-unsafe" = []

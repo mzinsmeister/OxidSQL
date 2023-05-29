@@ -44,6 +44,9 @@ fn main() {
         match readline {
             Ok(line) => {
                 rl.add_history_entry(line.as_str()).unwrap();
+                if line.as_str() == "\\q" {
+                    break;
+                }
                 if let Err(e) = database.query(line.as_str()) {
                     println!("Error: {:?}", e);
                 }

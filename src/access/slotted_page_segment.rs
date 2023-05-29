@@ -1,6 +1,8 @@
 use std::{collections::BTreeMap, ops::{Deref, DerefMut}};
 
-use crate::{storage::{buffer_manager::{BufferManager, BMArc}, page::{Page, PAGE_SIZE, PageId}}, types::RelationTID};
+use zerocopy::FromBytes;
+
+use crate::{storage::{buffer_manager::{BufferManager, BMArc}, page::{Page, PAGE_SIZE, PageId, SegmentId}}, types::RelationTID};
 
 use super::{free_space_inventory::FreeSpaceSegment, tuple::Tuple};
 
@@ -102,7 +104,7 @@ impl From<&Slot> for [u8; 8] {
 #[derive(Debug, Clone)]
 pub struct SlottedPageSegment<B: BufferManager> {
     bm: B,
-    segment_id: u16,
+    segment_id: SegmentId,
     free_space_segment: FreeSpaceSegment<B>
 }
 
@@ -111,7 +113,7 @@ impl<B: BufferManager> SlottedPageSegment<B> {
         PAGE_SIZE - HEADER_SIZE - SLOT_SIZE
     }
 
-    pub fn new(bm: B, segment_id: u16, free_space_segment_id: u16) -> SlottedPageSegment<B> {
+    pub fn new(bm: B, segment_id: SegmentId, free_space_segment_id: SegmentId) -> SlottedPageSegment<B> {
         SlottedPageSegment {
             bm: bm.clone(),
             segment_id,

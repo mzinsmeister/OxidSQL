@@ -1,5 +1,8 @@
 use std::ops::{Deref, DerefMut};
 
+// TODO: Try playing around with #[repr(align(512))] to see whether that could
+// achieve the result too.
+
 #[cfg(any(not(unix), feature="allow-unsafe"))]
 pub type AlignedSlice = Box<[u8]>;
 

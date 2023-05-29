@@ -11,7 +11,8 @@ pub enum AnalyzerError<B: BufferManager> {
     RelationNotFoundError(String),
     AttributeNotFoundError(String),
     UnboundBinding(String),
-    AmbiguousAttributeName(String)
+    AmbiguousAttributeName(String),
+    UncomparableDataTypes(String),
 }
 
 impl<B: BufferManager> Display for AnalyzerError<B> {
@@ -110,6 +111,9 @@ impl<B: BufferManager> Analyzer<B> {
                         ParseWhereClauseItem::Name(n2) => {
                             let left = Self::find_bound_attribute(n1, from_tables)?;
                             let right = Self::find_bound_attribute(n2, from_tables)?;
+                            if !left.attribute.data_type.is_comparable_to(&right.attribute.data_type) {
+                                return Err(AnalyzerError::UncomparableDataTypes(format!("{} and {}", left.attribute.data_type, right.attribute.data_type)));
+                            }
                             join_predicates.push((left, right));
                             return Ok(())
                         },
@@ -124,6 +128,10 @@ impl<B: BufferManager> Analyzer<B> {
                         ParseWhereClauseItem::Value(_) => return Err(AnalyzerError::UnimplementedError("literal = literal comparisons currentlly unimplemented".to_string())),
                     },
                 };
+                let attribute = Self::find_bound_attribute(l, from_tables)?;
+                if !attribute.attribute.data_type.is_comparable_to_value(r) {
+                    return Err(AnalyzerError::UncomparableDataTypes(format!("{} and {}", attribute.attribute.data_type, r)));
+                }
                 let selection = Selection {
                     attribute: Self::find_bound_attribute(l, from_tables)?,
                     value: r.clone(),
@@ -172,6 +180,11 @@ impl<B: BufferManager> Analyzer<B> {
 
     fn find_bound_attribute(parse_attribute: &BoundParseAttribute, tables: &[BoundTable]) -> Result<BoundAttribute, AnalyzerError<B>> {
         let binding = parse_attribute.binding.map(|s| s.to_string());
+        if let Some(binding) = &binding {
+            if !tables.iter().any(|t| t.binding == Some(binding.clone())) {
+                return Err(AnalyzerError::UnboundBinding(binding.clone()));
+            }
+        }
         let attribute = {
             let found_attributes = tables.iter()
                 .filter(|t| t.binding == binding)
@@ -204,7 +217,9 @@ mod test {
         catalog.create_table(TableDesc{
                 id: 1, 
                 name: "people".to_string(), 
-                segment_id: 1024, 
+                segment_id: 1024,
+                fsi_segment_id: 1025,
+                sample_segment_id: 1026,
                 attributes: vec![
                     AttributeDesc{
                         id: 1,

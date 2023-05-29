@@ -416,6 +416,8 @@ mod test {
                 }
             ],
             segment_id: 0,
+            fsi_segment_id: 1,
+            sample_segment_id: 2,
             cardinality: 2,
         }
     }

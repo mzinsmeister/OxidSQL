@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::storage::{buffer_manager::BufferManager, page::{PAGE_SIZE, PageId, Page, OffsetId}};
+use crate::storage::{buffer_manager::BufferManager, page::{PAGE_SIZE, PageId, Page, OffsetId, SegmentId}};
 
 /*
 Free Space Segment:
@@ -36,12 +36,12 @@ coming in.
 #[derive(Debug, Clone)]
 pub struct FreeSpaceSegment<B: BufferManager> {
     bm: B,
-    segment_id: u16,
+    segment_id: SegmentId,
     max_useable_space: usize
 }
 
 impl<B: BufferManager> FreeSpaceSegment<B> {
-    pub fn new(segment_id: u16, max_useable_space: usize, bm: B) -> Self {
+    pub fn new(segment_id: SegmentId, max_useable_space: usize, bm: B) -> Self {
         Self { bm, segment_id, max_useable_space }
     }
 
@@ -178,8 +178,6 @@ impl<B: BufferManager> FreeSpaceSegment<B> {
 
 #[cfg(test)]
 mod test {
-    use std::sync::Arc;
-
     use crate::storage::{buffer_manager::mock::MockBufferManager, page::PAGE_SIZE};
 
     use super::FreeSpaceSegment;
@@ -198,7 +196,7 @@ mod test {
     fn update_cache_completely() {
         let bm = MockBufferManager::new(PAGE_SIZE);
         let testee = FreeSpaceSegment::new(0, 1000, bm);
-        testee.update_page_size(0, 0);
+        testee.update_page_size(0, 0).unwrap();
         assert_eq!(testee.find_page(1000).unwrap(), 1);
         assert_eq!(testee.find_page(10).unwrap(), 1);
         assert_eq!(testee.find_page(200).unwrap(), 1);
@@ -209,7 +207,7 @@ mod test {
     fn update_cache_partly() {
         let bm = MockBufferManager::new(PAGE_SIZE);
         let testee = FreeSpaceSegment::new(0, 1000, bm);
-        testee.update_page_size(0, 500);
+        testee.update_page_size(0, 500).unwrap();
         assert_eq!(testee.find_page(1000).unwrap(), 1);
         assert_eq!(testee.find_page(10).unwrap(), 0);
         assert_eq!(testee.find_page(200).unwrap(), 0);

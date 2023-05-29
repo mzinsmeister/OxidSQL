@@ -241,7 +241,9 @@ mod test {
                 },
             ],
             cardinality: 100,
-            segment_id: 1000
+            segment_id: 1000,
+            fsi_segment_id: 1001,
+            sample_segment_id: 1002,
         };
         let source_plan = plan::PhysicalQueryPlanOperator::Tablescan {
             table: table.clone()
@@ -291,7 +293,9 @@ mod test {
                 },
             ],
             cardinality: 100,
-            segment_id: 1000
+            segment_id: 1000,
+            fsi_segment_id: 1001,
+            sample_segment_id: 1002,
         };
         let table2 = TableDesc {
             id: 1,
@@ -320,7 +324,9 @@ mod test {
                 },
             ],
             cardinality: 1,
-            segment_id: 1002
+            segment_id: 1003,
+            fsi_segment_id: 1004,
+            sample_segment_id: 1005,
         };
         let source_plan1 = plan::PhysicalQueryPlanOperator::Tablescan {
             table: table1.clone()

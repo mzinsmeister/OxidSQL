@@ -1,9 +1,9 @@
+use ahash::{AHasher, RandomState};
 use parking_lot::{RwLock, Mutex, MutexGuard};
 
 use crate::storage::page::{Page, PageState};
 use crate::util::align::alligned_slice;
 use std::collections::BTreeMap;
-use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
 use std::fmt::{Display, Debug};
 use std::hash::{Hash, Hasher};
@@ -75,12 +75,6 @@ fn new_page(page_id: PageId) -> PageType {
 #[derive(Debug)]
 pub(super) struct PageTableBucket {
     bucket: Vec<(PageId, PageType)>
-}
-
-fn hash_page_id(page_id: PageId) -> usize {
-    let mut hasher = DefaultHasher::new();
-    page_id.hash(&mut hasher);
-    hasher.finish() as usize
 }
 
 impl PageTableBucket {
@@ -156,7 +150,8 @@ pub struct HashTableBufferManager<R: Replacer + Send, S: StorageManager> {
     disk_manager: S,
     replacer: Mutex<R>,
     size: usize,
-    segment_sizes: RwLock<BTreeMap<u16, usize>>,
+    segment_sizes: RwLock<BTreeMap<SegmentId, usize>>,
+    hasher: RandomState
 }
 
 #[derive(Debug)]
@@ -198,7 +193,7 @@ fn new_buffer_frame(size: usize) -> Box<[u8]> {
 
 impl<R: Replacer + Send, S: StorageManager> HashTableBufferManager<R, S> {
     pub fn new(disk_manager: S, replacer: R, size: usize) -> Arc<HashTableBufferManager<R, S>> {
-        let mut pagetable = PageTableType::with_capacity(size * 2);
+        let mut pagetable = PageTableType::with_capacity(size.next_power_of_two() * 2);
         for _ in 0..size * 2 {
             pagetable.push(Mutex::new(PageTableBucket::new()));
         }
@@ -209,11 +204,12 @@ impl<R: Replacer + Send, S: StorageManager> HashTableBufferManager<R, S> {
             replacer: Mutex::new(replacer),
             size,
             segment_sizes: RwLock::new(BTreeMap::new()),
+            hasher: RandomState::new()
         })
     }
 
     fn get_pagetable_index(&self, page_id: PageId) -> usize {
-        hash_page_id(page_id) % self.pagetable.len()
+        self.hasher.hash_one(page_id) as usize & (self.pagetable.len() - 1)
     }
 
     fn load(&self, page_id: PageId, mut page_bucket: MutexGuard<PageTableBucket>) -> Result<PageType, BufferManagerError> {
@@ -363,14 +359,14 @@ pub mod mock {
 
     use parking_lot::Mutex;
 
-    use crate::{storage::page::{PageId}, util::align::alligned_slice};
+    use crate::{storage::page::{PageId, SegmentId, OffsetId}, util::align::alligned_slice};
 
     use super::{PageType, BufferManager, new_page, BMArc};
 
     #[derive(Debug)]
     pub struct MockBufferManager {
         page_size: usize,
-        segments: Mutex<HashMap<u16, HashMap<u64, PageType>>>
+        segments: Mutex<HashMap<SegmentId, HashMap<OffsetId, PageType>>>
     }
 
     impl MockBufferManager {

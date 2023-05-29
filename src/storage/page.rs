@@ -8,8 +8,6 @@ use byteorder::{BigEndian, WriteBytesExt, ReadBytesExt};
 use crate::util::align::AlignedSlice;
 use crate::util::align::EmptyAlignedSlice;
 
-pub type RelationIdType = u16;
-
 #[derive(Debug)]
 pub enum PageError {
     NotEnoughSpace{ has: u16, need: usize }
@@ -32,7 +30,7 @@ pub const PAGE_SIZE: usize = 16384;
 
 //Instead of Wrapping a Page in a Lock, maybe Wrap data in an RwLock, make dirty an Atomic Bool and wrap id in RwLock or something
 
-pub type SegmentId = u16;
+pub type SegmentId = u32;
 pub type OffsetId = u64;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -42,23 +40,8 @@ pub struct PageId {
 }
 
 impl PageId {
-    pub fn new(segment_id: u16, offset_id: u64) -> PageId {
+    pub fn new(segment_id: SegmentId, offset_id: u64) -> PageId {
         Self { offset_id, segment_id }
-    }
-}
-
-impl From<u64> for PageId {
-    fn from(input: u64) -> Self {
-        Self { 
-            offset_id: input & ((1u64 << 48) - 1), 
-            segment_id: (input >> 48) as u16 
-        }
-    }
-}
-
-impl Into<u64> for PageId {
-    fn into(self) -> u64 {
-        ((self.segment_id as u64) << 48) | self.offset_id
     }
 }
 

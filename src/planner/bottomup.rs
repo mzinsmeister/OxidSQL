@@ -148,6 +148,8 @@ mod test {
                 table: TableDesc {
                 id: 0,
                 segment_id: 1000,
+                fsi_segment_id: 1001,
+                sample_segment_id: 1002,
                 name: "test".to_string(),
                 attributes: vec![
                     AttributeDesc {
@@ -183,6 +185,8 @@ mod test {
                                 assert_eq!(table, TableDesc {
                                     id: 0,
                                     segment_id: 1000,
+                                    fsi_segment_id: 1001,
+                                    sample_segment_id: 1002,
                                     name: "test".to_string(),
                                     attributes: vec![
                                         AttributeDesc {

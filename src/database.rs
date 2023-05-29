@@ -45,6 +45,8 @@ impl OxidSQLDatabase {
         self.catalog.create_table(TableDesc {
             id: 1,
             segment_id: 1024,
+            fsi_segment_id: 1025,
+            sample_segment_id: 1026,
             name: "people".to_string(),
             cardinality: 3,
             attributes: vec![
@@ -73,7 +75,9 @@ impl OxidSQLDatabase {
         });
         self.catalog.create_table(TableDesc {
             id: 2,
-            segment_id: 1026,
+            segment_id: 1027,
+            fsi_segment_id: 1028,
+            sample_segment_id: 1029,
             name: "cars".to_string(),
             cardinality: 2,
             attributes: vec![

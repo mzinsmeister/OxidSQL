@@ -81,6 +81,17 @@ impl TupleValueType {
     }
 }
 
+impl Display for TupleValueType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TupleValueType::BigInt => write!(f, "BIGINT"),
+            TupleValueType::VarChar(size) => write!(f, "VARCHAR({})", size),
+            TupleValueType::Int => write!(f, "INT"),
+            TupleValueType::SmallInt => write!(f, "SMALLINT")
+        }
+    }
+}
+
 #[derive(Debug, Clone, Hash)]
 pub enum TupleValue {
     BigInt(i64),
@@ -228,6 +239,39 @@ mod tests {
         // Non-comparable types
         assert_eq!(TupleValue::BigInt(10).partial_cmp(&TupleValue::String("hello".to_string())), None);
         assert_eq!(TupleValue::String("hello".to_string()).partial_cmp(&TupleValue::BigInt(10)), None);
+    }
+
+    #[test]
+    fn test_is_comparable_to() {
+        assert!(TupleValueType::BigInt.is_comparable_to(&TupleValueType::BigInt));
+        assert!(TupleValueType::BigInt.is_comparable_to(&TupleValueType::Int));
+        assert!(TupleValueType::BigInt.is_comparable_to(&TupleValueType::SmallInt));
+        assert!(TupleValueType::Int.is_comparable_to(&TupleValueType::BigInt));
+        assert!(TupleValueType::Int.is_comparable_to(&TupleValueType::Int));
+        assert!(TupleValueType::Int.is_comparable_to(&TupleValueType::SmallInt));
+        assert!(TupleValueType::SmallInt.is_comparable_to(&TupleValueType::BigInt));
+        assert!(TupleValueType::SmallInt.is_comparable_to(&TupleValueType::Int));
+        assert!(TupleValueType::SmallInt.is_comparable_to(&TupleValueType::SmallInt));
+        assert!(TupleValueType::VarChar(10).is_comparable_to(&TupleValueType::VarChar(10)));
+        assert!(TupleValueType::VarChar(10).is_comparable_to(&TupleValueType::VarChar(20)));
+        assert!(!TupleValueType::VarChar(10).is_comparable_to(&TupleValueType::BigInt));
+        assert!(!TupleValueType::BigInt.is_comparable_to(&TupleValueType::VarChar(10)));
+    }
+
+    #[test]
+    fn test_is_comparable_to_value() {
+        assert!(TupleValueType::BigInt.is_comparable_to_value(&TupleValue::BigInt(10)));
+        assert!(TupleValueType::BigInt.is_comparable_to_value(&TupleValue::Int(10)));
+        assert!(TupleValueType::BigInt.is_comparable_to_value(&TupleValue::SmallInt(10)));
+        assert!(TupleValueType::Int.is_comparable_to_value(&TupleValue::BigInt(10)));
+        assert!(TupleValueType::Int.is_comparable_to_value(&TupleValue::Int(10)));
+        assert!(TupleValueType::Int.is_comparable_to_value(&TupleValue::SmallInt(10)));
+        assert!(TupleValueType::SmallInt.is_comparable_to_value(&TupleValue::BigInt(10)));
+        assert!(TupleValueType::SmallInt.is_comparable_to_value(&TupleValue::Int(10)));
+        assert!(TupleValueType::SmallInt.is_comparable_to_value(&TupleValue::SmallInt(10)));
+        assert!(TupleValueType::VarChar(10).is_comparable_to_value(&TupleValue::String("hello".to_string())));
+        assert!(!TupleValueType::VarChar(10).is_comparable_to_value(&TupleValue::BigInt(10)));
+        assert!(!TupleValueType::BigInt.is_comparable_to_value(&TupleValue::String("hello".to_string())));
     }
 }
 
