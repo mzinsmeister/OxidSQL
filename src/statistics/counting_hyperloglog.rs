@@ -35,8 +35,8 @@ struct CountingHyperLogLog<R: Fn(f64) -> bool = fn(f64) -> bool> {
 const M: f64 = 64.0;
 const ALPHA_M: f64 = 0.709;
 
-fn linear_counting(m: f64, V: u8) -> f64 {
-    m * (m / V as f64).ln()
+fn linear_counting(m: f64, v: u8) -> f64 {
+    m * (m / v as f64).ln()
 }
 
 impl CountingHyperLogLog<fn(f64) -> bool> {
