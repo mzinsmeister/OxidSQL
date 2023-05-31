@@ -66,7 +66,9 @@ impl Tuple {
                     },
                     TupleValueType::VarChar(_) => {
                         var_atts.push((parsed_attributes, attribute_type, cursor.read_u16::<BigEndian>().unwrap(), parse_attributes[i]));
-                        parsed_attributes += 1;
+                        if parse_attributes[i] {
+                            parsed_attributes += 1;
+                        }
                     }
                     TupleValueType::Int => {
                         if parse_attributes[i] {
@@ -242,6 +244,8 @@ impl<'a, V: BorrowMut<Option<TupleValue>> + 'a> MutatingTupleParser<'a, V> {
 
 #[cfg(test)]
 mod test {
+
+    // TODO: Test the partial parsing and "parse into" stuff
 
     use super::*;
 

@@ -35,3 +35,4 @@ on OS swapping for this purpose for now).
  - Analysis, planning and optimization (DPccp for now, will do DPhyp later)
  - Execution through a simple single threaded 
     volcano style interpreted engine printing the results to stdout (for now)
+ - crashing and burning (no, but it panics) when someone enters a query that results in a cross product
