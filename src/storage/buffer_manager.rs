@@ -1,4 +1,4 @@
-use ahash::{AHasher, RandomState};
+use ahash::RandomState;
 use parking_lot::{RwLock, Mutex, MutexGuard};
 
 use crate::storage::page::{Page, PageState};
@@ -6,7 +6,6 @@ use crate::util::align::alligned_slice;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{Display, Debug};
-use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

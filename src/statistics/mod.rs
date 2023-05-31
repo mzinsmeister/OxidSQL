@@ -4,17 +4,21 @@ pub mod sampling;
 
 /*
     Since it's pretty clearly the superior strategy vs building histograms and also seems simpler
-    to implement with good results in more cases, sampling is going to be used as the main method
-    for estimating selectivities of predicates. In addition to that HyperLogLog distinct count
-    sketches will be used to estimate the number of distinct values in a column. All of this is
-    supposed to be updated online when tuples are inserted/updated/deleted which should be possible
-    with reasonably good performance according to the literature 
-    (https://altan.birler.co/static/papers/2020DAMON_ConcurrentOnlineSampling.pdf). Also i don't 
-    want to implement the logic to regularly update the statistics in the background.
+    to implement with good results in more cases, sampling plus sketches are going to be used as 
+    the main method for estimating selectivities of predicates. In addition to that HyperLogLog 
+    distinct count sketches will be used to estimate the number of distinct values in a column. 
+    All of the statistics calculation is supposed to be updated online when tuples are 
+    inserted/updated/deleted which should be possible with reasonably good performance according 
+    to the literature (https://altan.birler.co/static/papers/2020DAMON_ConcurrentOnlineSampling.pdf
+    for sampling). Also i don't want to implement the logic to regularly update the statistics in 
+    the background. statistics will generally only be accumulated in memory (except for samples which
+    will just be written into a regular heap segment and only written to
+    disk at checkpoints/flush/shutdown. Otherwise there would be quite a performance impact for
+    statistics gathering, also we're talking 
     
     Ironically the commercial system with the best cardinality estimation seems to be MS SQL Server 
     which uses histograms a lot (also sampling i guess?) as far as i know but as far as i know they 
-    go to ridiculous lengths to get these results this way. 
+    go to ridiculous lengths to get these results this way.
 
     These two methods can then be combined to get a good estimate of the selectivity of a predicate
     by:

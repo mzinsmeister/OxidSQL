@@ -29,7 +29,7 @@ fn new_scan<'a, B: BufferManager>(sp_segment: SlottedPageSegment<B>, table_desc:
         registers,
         table_desc,
         scan: sp_segment.scan(Box::new(move |raw: &[u8]| {
-            let tuple = Tuple::parse_binary(&attribute_types, raw);
+            let tuple = Tuple::parse_binary_all(&attribute_types, raw);
             Some(tuple)
         }))
     }

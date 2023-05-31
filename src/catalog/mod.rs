@@ -2,7 +2,7 @@ use std::{sync::{Arc, atomic::{Ordering, AtomicU64}}, collections::BTreeMap};
 
 use parking_lot::RwLock;
 
-use crate::{access::{SlottedPageSegment, tuple::Tuple}, storage::{buffer_manager::BufferManager, page::SegmentId}, types::{TupleValueType, TupleValue, RelationTID}};
+use crate::{access::{SlottedPageSegment, tuple::Tuple, SlottedPageHeapStorage, HeapStorage}, storage::{buffer_manager::BufferManager, page::SegmentId}, types::{TupleValueType, TupleValue, RelationTID}};
 
 type DbObjectRef = u32;
 
@@ -114,12 +114,13 @@ impl<B: BufferManager> CatalogCache<B> {
             table.cardinality = cardinality.load(Ordering::SeqCst);
             return Ok(Some(table));
         }
-        let db_object = self.db_object_segment.find_db_object_by_name(DbObjectType::Relation, name);
+        let db_object = self.db_object_segment.find_db_object_by_name(DbObjectType::Relation, name)?;
         if let Some(db_object) = db_object {
-            let attributes = self.attribute_segment.get_attributes_by_db_object(db_object.id);
+            let attributes = self.attribute_segment.get_attributes_by_db_object(db_object.id)?;
             // TODO: Fix statistics hack so that you don't need to scan all tables on startup first
             let slotted_page = SlottedPageSegment::new(self.bm.clone(), db_object.segment_id, db_object.segment_id + 1);
-            let cardinality = slotted_page.clone().scan(|data| { Some(()) }).count() as u64;
+            fn ignore(_data: &[u8]) -> Option<()> { Some(()) }
+            let cardinality = slotted_page.clone().scan(ignore).count() as u64;
             let table = TableDesc { id: db_object.id, name: db_object.name, attributes, segment_id: db_object.segment_id, cardinality: cardinality, fsi_segment_id: db_object.fsi_segment_id.unwrap(), sample_segment_id: db_object.sample_segment_id.unwrap() };
             let mut table_name_cache = self.table_name_index.write();
             let mut table_cache = self.table_cache.write();
@@ -183,39 +184,31 @@ struct DbObjectDesc {
     sample_segment_id: Option<SegmentId>
 }
 
-impl From<&[u8]> for DbObjectDesc {
+impl From<&Tuple> for DbObjectDesc {
 
-    fn from(value: &[u8]) -> Self {
-        let parsed_tuple = Tuple::parse_binary(&vec![
-            TupleValueType::Int,
-            TupleValueType::VarChar(u16::MAX),
-            TupleValueType::SmallInt,
-            TupleValueType::Int,
-            TupleValueType::Int,
-            TupleValueType::Int
-        ], value);
-        let id = match parsed_tuple.values[0] {
+    fn from(value: &Tuple) -> Self {
+        let id = match value.values[0] {
             Some(TupleValue::Int(id)) => id,
             _ => unreachable!()
         };
-        let name = match parsed_tuple.values[1] {
+        let name = match value.values[1] {
             Some(TupleValue::String(ref name)) => name.clone(),
             _ => unreachable!()
         };
-        let class_type = match parsed_tuple.values[2] {
+        let class_type = match value.values[2] {
             Some(TupleValue::SmallInt(class_type)) => DbObjectType::from_u16(class_type as u16),
             _ => unreachable!()
         };
-        let segment_id = match parsed_tuple.values[3] {
+        let segment_id = match value.values[3] {
             Some(TupleValue::Int(segment_id)) => segment_id as u32,
             _ => unreachable!()
         };
-        let fsi_segment_id = match parsed_tuple.values[3] {
+        let fsi_segment_id = match value.values[3] {
             Some(TupleValue::Int(segment_id)) => Some(segment_id as u32),
             None => None,
             _ => unreachable!()
         };
-        let sample_id = match parsed_tuple.values[3] {
+        let sample_id = match value.values[3] {
             Some(TupleValue::Int(segment_id)) => Some(segment_id as u32),
             None => None,
             _ => unreachable!()
@@ -238,49 +231,56 @@ impl From<&DbObjectDesc> for Tuple {
 }
 
 struct DbObjectCatalogSegment<B: BufferManager> {
-    sp_segment: SlottedPageSegment<B>,
+    sp_segment: SlottedPageHeapStorage<B>,
 }
 
 impl<B: BufferManager> DbObjectCatalogSegment<B> {
     fn new(buffer_manager: B) -> DbObjectCatalogSegment<B> {
+        let attributes = vec![
+            TupleValueType::Int,
+            TupleValueType::VarChar(u16::MAX),
+            TupleValueType::SmallInt,
+            TupleValueType::Int,
+            TupleValueType::Int,
+            TupleValueType::Int
+        ];
+        let segment = SlottedPageSegment::new(buffer_manager, DB_OBJECT_CATALOG_SEGMENT_ID, DB_OBJECT_CATALOG_SEGMENT_ID + 1);
         DbObjectCatalogSegment {
-            sp_segment: SlottedPageSegment::new(buffer_manager, DB_OBJECT_CATALOG_SEGMENT_ID, DB_OBJECT_CATALOG_SEGMENT_ID + 1)
+            sp_segment: SlottedPageHeapStorage::new(segment, attributes)
         }
     }
 
-    fn find_first_db_object<F: Fn(&DbObjectDesc) -> bool>(&self, filter: F) -> Option<(RelationTID, DbObjectDesc)> {
-        let mut scan = self.sp_segment.clone().scan(|data| {
+    fn find_first_db_object<F: Fn(&DbObjectDesc) -> bool>(&self, filter: F) -> Result<Option<(RelationTID, DbObjectDesc)>, B::BError>{
+        // ParsingDbObjectDesc twice. Could be more efficient.
+        let mut scan = self.sp_segment.scan_all(|data| {
             let db_object_desc = DbObjectDesc::from(data);
-            if filter(&db_object_desc) {
-                Some(db_object_desc)
-            } else {
-                None
-            }
-        });
-        scan.next().map(|f| f.unwrap())
+            filter(&db_object_desc)
+        })?;
+        if let Some(first) = scan.next() {
+            first.map(|f| Some((f.0, DbObjectDesc::from(&f.1))))
+        } else {
+            Ok(None)
+        }
     }
 
-    fn get_db_object_by_id(&self, id: u32) -> Option<DbObjectDesc> {
-        self.find_first_db_object(|db_object_desc| db_object_desc.id == id).map(|(_, d)| d)
+    fn get_db_object_by_id(&self, id: u32) -> Result<Option<DbObjectDesc>, B::BError> {
+        self.find_first_db_object(|db_object_desc| db_object_desc.id == id).map(|e| e.map(|(_, d)| d))
     }
 
-    fn find_db_object_by_name(&self, obj_type: DbObjectType, name: &str) -> Option<DbObjectDesc> {
-        self.find_first_db_object(|db_object_desc| db_object_desc.class_type == obj_type && db_object_desc.name == name).map(|(_, d)| d)
+    fn find_db_object_by_name(&self, obj_type: DbObjectType, name: &str) -> Result<Option<DbObjectDesc>, B::BError> {
+        self.find_first_db_object(|db_object_desc| db_object_desc.class_type == obj_type && db_object_desc.name == name).map(|e| e.map(|(_, d)| d))
     }
 
     fn insert_db_object(&self, db_object: &DbObjectDesc) -> Result<(), B::BError> {
         let tuple = Tuple::from(db_object);
-        let mut data = vec![0; tuple.calculate_binary_length()];
-        tuple.write_binary(&mut data);
-        self.sp_segment.insert_record(&data)?;
+        self.sp_segment.insert_tuple(tuple)?;
         Ok(())
     }
 
     fn update_db_object(&self, db_object: &DbObjectDesc) -> Result<(), B::BError> {
-        let (tid, _) = self.find_first_db_object(|db_object_desc| db_object_desc.id == db_object.id).unwrap();
+        let (tid, _) = self.find_first_db_object(|db_object_desc| db_object_desc.id == db_object.id)?.unwrap();
         let tuple = Tuple::from(db_object);
-        let buffer: Box<[u8]> = tuple.into();
-        self.sp_segment.write_record(tid, &buffer)?;
+        self.sp_segment.update_tuple(tid, tuple)?;
         Ok(())
     }
 }
@@ -296,33 +296,25 @@ pub struct AttributeDesc {
 }
 
 
-impl From<&[u8]> for AttributeDesc {
-    fn from(value: &[u8]) -> Self {
-        let parsed_tuple = Tuple::parse_binary(&vec![
-            TupleValueType::Int, // db_object_id
-            TupleValueType::Int, // id
-            TupleValueType::VarChar(u16::MAX), // name
-            TupleValueType::SmallInt, // data_type
-            TupleValueType::SmallInt, // length (where applicable, otherwhise don't care)
-            TupleValueType::SmallInt, // integrity_constraint_flags
-        ], value);
-        let table_ref = match parsed_tuple.values[0] {
+impl From<&Tuple> for AttributeDesc {
+    fn from(value: &Tuple) -> Self {
+        let table_ref = match value.values[0] {
             Some(TupleValue::Int(id)) => id as u32,
             _ => unreachable!()
         };
-        let id = match parsed_tuple.values[1] {
+        let id = match value.values[1] {
             Some(TupleValue::Int(id)) => id,
             _ => unreachable!()
         };
-        let name = match parsed_tuple.values[2] {
+        let name = match value.values[2] {
             Some(TupleValue::String(ref name)) => name.clone(),
             _ => unreachable!()
         };
-        let data_type = match parsed_tuple.values[3] {
+        let data_type = match value.values[3] {
             Some(TupleValue::SmallInt(data_type)) => {
                 match data_type {
                     0 => TupleValueType::BigInt,
-                    1 => TupleValueType::VarChar(parsed_tuple.values[4].as_ref().unwrap().as_small_int() as u16),
+                    1 => TupleValueType::VarChar(value.values[4].as_ref().unwrap().as_small_int() as u16),
                     2 => TupleValueType::Int,
                     3 => TupleValueType::SmallInt,
                     _ => unreachable!()
@@ -330,7 +322,7 @@ impl From<&[u8]> for AttributeDesc {
             },
             _ => unreachable!()
         };
-        let nullable = match parsed_tuple.values[5] {
+        let nullable = match value.values[5] {
             Some(TupleValue::SmallInt(integrity_constraint_flags)) => integrity_constraint_flags == 0,
             _ => unreachable!()
         };
@@ -359,58 +351,58 @@ impl From<&AttributeDesc> for Tuple {
 }
 
 struct AttributeCatalogSegment<B: BufferManager> {
-    sp_segment: SlottedPageSegment<B>,
+    sp_segment: SlottedPageHeapStorage<B>,
 }
 
 impl<B: BufferManager> AttributeCatalogSegment<B> {
     fn new(buffer_manager: B) -> AttributeCatalogSegment<B> {
+        let attributes = vec![
+            TupleValueType::Int, // db_object_id
+            TupleValueType::Int, // id
+            TupleValueType::VarChar(u16::MAX), // name
+            TupleValueType::SmallInt, // data_type
+            TupleValueType::SmallInt, // length (where applicable, otherwhise don't care)
+            TupleValueType::SmallInt, // integrity_constraint_flags
+        ];
+        let segment = SlottedPageSegment::new(buffer_manager, ATTRIBUTE_CATALOG_SEGMENT_ID, ATTRIBUTE_CATALOG_SEGMENT_ID + 1);
         AttributeCatalogSegment {
-            sp_segment: SlottedPageSegment::new(buffer_manager, ATTRIBUTE_CATALOG_SEGMENT_ID, ATTRIBUTE_CATALOG_SEGMENT_ID + 1)
+            sp_segment: SlottedPageHeapStorage::new(segment, attributes)
         }
     }
 
-    fn get_attributes_by_db_object(&self, db_object_id: u32) -> Vec<AttributeDesc> {
-        self.sp_segment.clone().scan(|data| {
+    fn get_attributes_by_db_object(&self, db_object_id: u32) -> Result<Vec<AttributeDesc>, B::BError> {
+        self.sp_segment.scan_all(|data| {
             let attribute_desc = AttributeDesc::from(data);
-            if attribute_desc.table_ref == db_object_id {
-                Some(attribute_desc)
-            } else {
-                None
-            }
-        }).map(|f| f.unwrap().1).collect()
+            attribute_desc.table_ref == db_object_id
+        })?.map(|f| f.map(|t| AttributeDesc::from(&t.1)))
+        .collect()
     }
 
-    fn get_attribute_by_db_object_and_name(&self, db_object_id: u32, name: &str) -> Option<AttributeDesc> {
-        self.sp_segment.clone().scan(|data| {
+    fn get_attribute_by_db_object_and_name(&self, db_object_id: u32, name: &str) -> Result<Option<AttributeDesc>, B::BError> {
+        let result = self.sp_segment.scan_all(|data| {
             let attribute_desc = AttributeDesc::from(data);
-            if attribute_desc.table_ref == db_object_id && attribute_desc.name == name {
-                Some(attribute_desc)
-            } else {
-                None
-            }
-        }).next().map(|f| f.unwrap().1)
+            attribute_desc.table_ref == db_object_id && attribute_desc.name == name
+        })?.next();
+        match result {
+            Some(Ok((_, tuple))) => Ok(Some(AttributeDesc::from(&tuple))),
+            Some(Err(e)) => Err(e),
+            None => Ok(None)
+        }
     }
 
     fn insert_attribute(&self, attribute: AttributeDesc) -> Result<(), B::BError> {
         let tuple = Tuple::from(&attribute);
-        let mut data = vec![0; tuple.calculate_binary_length()];
-        tuple.write_binary(&mut data);
-        self.sp_segment.insert_record(&data)?;
+        self.sp_segment.insert_tuple(tuple)?;
         Ok(())
     }
 
     fn update_attribute(&self, attribute: AttributeDesc) -> Result<(), B::BError> {
-        let (tid, _) = self.sp_segment.clone().scan(|data| {
+        let (tid, _) = self.sp_segment.scan_all(|data| {
             let attribute_desc = AttributeDesc::from(data);
-            if attribute_desc.id == attribute.id {
-                Some(attribute_desc)
-            } else {
-                None
-            }
-        }).next().unwrap().unwrap();
+            attribute_desc.id == attribute.id
+        })?.next().unwrap().unwrap();
         let tuple = Tuple::from(&attribute);
-        let buffer: Box<[u8]> = tuple.into();
-        self.sp_segment.write_record(tid, &buffer)?;
+        self.sp_segment.update_tuple(tid, tuple)?;
         Ok(())
     }
 }
@@ -428,7 +420,7 @@ mod test {
         let catalog_segment = DbObjectCatalogSegment::new(buffer_manager.clone());
         let db_object_desc = DbObjectDesc { id: 0, name: "db_object".to_string(), class_type: DbObjectType::Relation, segment_id: 1, fsi_segment_id: Some(2), sample_segment_id: None };
         catalog_segment.insert_db_object(&db_object_desc).unwrap();
-        let db_object_desc = catalog_segment.get_db_object_by_id(0).unwrap();
+        let db_object_desc = catalog_segment.get_db_object_by_id(0).unwrap().unwrap();
         assert_eq!(db_object_desc.name, "db_object");
         assert_eq!(db_object_desc.class_type, crate::catalog::DbObjectType::Relation);
         assert_eq!(db_object_desc.segment_id, 1);
@@ -440,13 +432,14 @@ mod test {
         let catalog_segment = DbObjectCatalogSegment::new(buffer_manager.clone());
         let db_object_desc = DbObjectDesc { id: 0, name: "db_object".to_string(), class_type: DbObjectType::Relation, segment_id: 1, fsi_segment_id: Some(2), sample_segment_id: None };
         catalog_segment.insert_db_object(&db_object_desc).unwrap();
-        let db_object_desc = catalog_segment.find_db_object_by_name(DbObjectType::Relation, "db_object").unwrap();
+        let db_object_desc = catalog_segment.find_db_object_by_name(DbObjectType::Relation, "db_object").unwrap().unwrap();
         assert_eq!(db_object_desc.id, 0);
         assert_eq!(db_object_desc.name, "db_object");
         assert_eq!(db_object_desc.class_type, crate::catalog::DbObjectType::Relation);
         assert_eq!(db_object_desc.segment_id, 1);
     }
 
+    #[test]
     fn test_catalog_segment_attributes_by_db_object() {
         let buffer_manager = MockBufferManager::new(PAGE_SIZE);
         let catalog_segment = DbObjectCatalogSegment::new(buffer_manager.clone());
@@ -460,7 +453,7 @@ mod test {
         attribute_catalog_segment.insert_attribute(attribute_descs[0].clone()).unwrap();
         attribute_catalog_segment.insert_attribute(attribute_descs[1].clone()).unwrap();
         attribute_catalog_segment.insert_attribute(attribute_descs[2].clone()).unwrap();
-        let attributes = attribute_catalog_segment.get_attributes_by_db_object(0);
+        let attributes = attribute_catalog_segment.get_attributes_by_db_object(0).unwrap();
         assert_eq!(attributes.len(), 2);
         for attribute in attribute_descs {
             if attribute.table_ref == 0 {
@@ -469,6 +462,7 @@ mod test {
         }
     }
 
+    #[test]
     fn test_catalog_segment_attribute_by_db_object_and_name() {
         let buffer_manager = MockBufferManager::new(PAGE_SIZE);
         let catalog_segment = DbObjectCatalogSegment::new(buffer_manager.clone());
@@ -477,7 +471,7 @@ mod test {
         catalog_segment.insert_db_object(&db_object_desc).unwrap();
         let attribute_desc = AttributeDesc { id: 0, name: "attribute".to_string(), data_type: TupleValueType::Int, nullable: false, table_ref: 0 };
         attribute_catalog_segment.insert_attribute(attribute_desc.clone()).unwrap();
-        let attribute_desc = attribute_catalog_segment.get_attribute_by_db_object_and_name(0, "attribute").unwrap();
+        let attribute_desc = attribute_catalog_segment.get_attribute_by_db_object_and_name(0, "attribute").unwrap().unwrap();
         assert_eq!(attribute_desc.id, 0);
         assert_eq!(attribute_desc.name, "attribute");
         assert_eq!(attribute_desc.data_type, TupleValueType::Int);

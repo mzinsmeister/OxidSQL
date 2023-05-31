@@ -22,11 +22,16 @@
     each other and will therefore make the sample much less representative of the entire table.
     The strategy we will use instead is to just sample new tuples from the main segment.
     To do this we will use the following strategy since we have no way of finding the 'nth tuple'
-    without scanning the entire table (we can only randomly pick pages): Randomly choose 3 pages and
-    sum up the numbers of tuples on them. Then randomly choose a number between 0 and the sum and
-    pick the nth tuple on those 3 pages. If that tuple is already in the sample we just scan the
-    relation until we find one that's not in the sample. This can result in a full table scan if the 
-    relation is very close to the sample size but this will only happen in very rare cases and even
+    without scanning the entire table (we can only randomly pick pages): Randomly choose 3 pages. Now
+    the probability of a specific tuple per page beeing picked is 1/P * 1/Tp where P is the number of
+    pages and Tp is the number of tuples on the page. Therefore a tuple on a page with twice as many
+    tuples will be picked with half the probability. To correct for this somewhat (only each tuple *on
+    the 3 pages* will have the same probability, not each tuple in the whole segment), we will have to make
+    the probability of a tuple on that page beeing picked twice as likely. To do this we think of the 3
+    pages as a sequential store of tuples and pick a random tuple from them. If that tuple is already 
+    in the sample (we will set a flag in the actual full segment) we just scan the relation until we 
+    find one that's not in the sample. This can result in a full table scan if the relation is very 
+    close to the sample size but this will only happen in very rare cases and even
     then it's not that expensive since the main segment will then be only slightly larger than the
     sample. We do this so that we can somewhat eliminate the bias towards larger tuples if we would
     do a two stage sampling (page->tuple on page).
@@ -35,7 +40,6 @@
     we will just update the samples in place (single active writer will be enforced since it's enforced)
     on the main segment anyway. 
 */
-
 use std::sync::atomic::{AtomicU64, AtomicU32};
 use std::sync::atomic::Ordering::Relaxed;
 
@@ -84,7 +88,7 @@ struct ListOfSkips<R: Fn() -> f32> {
     list: Box<[Skip]>,
     head: AtomicU64,
     free_head: AtomicU64,
-    m: usize,
+    m: u32,
     random: R,
 }
 
@@ -151,7 +155,7 @@ impl<'a, R: Fn() -> f32> Drop for SkipGuard<'a, R> {
 }
 
 impl<R: Fn() -> f32> ListOfSkips<R> {
-    pub fn new(n_threads: u32, n_samples: usize, random: R) -> Self {
+    pub fn new(n_threads: u32, n_samples: u32, random: R) -> Self {
         let mut list = Vec::with_capacity(n_threads as usize);
         let w = (((random)()).ln()/n_samples as f32).exp();
         let w_next = w * (((random)()).ln()/n_samples as f32).exp();
@@ -173,6 +177,32 @@ impl<R: Fn() -> f32> ListOfSkips<R> {
             head: AtomicU64::new(0),
             free_head: AtomicU64::new(1),
             m: n_samples,
+            random,
+        }
+    }
+
+    pub fn from_bytes(bytes: &[u8], random: R) -> Self {
+        let len = u32::from_be_bytes(bytes[0..4].try_into().unwrap());
+        let mut list = Vec::with_capacity(len as usize);
+        let head = u64::from_le_bytes(bytes[4..12].try_into().unwrap());
+        let free_head = u64::from_le_bytes(bytes[12..20].try_into().unwrap());
+        let m = u32::from_le_bytes(bytes[20..24].try_into().unwrap());
+        let w_next = f32::from_le_bytes(bytes[24..28].try_into().unwrap());
+        for i in 0..len {
+            let start_byte = i as usize * 12 + 28;
+            let length = u64::from_le_bytes(bytes[start_byte..start_byte+8].try_into().unwrap());
+            let next = u32::from_le_bytes(bytes[start_byte+8..start_byte+12].try_into().unwrap());
+            list.push(Skip {
+                length: AtomicU64::new(length),
+                next: AtomicU32::new(next),
+            });
+        }
+        Self {
+            w_next: AtomicF32::new(0.0),
+            list: list.into_boxed_slice(),
+            head: AtomicU64::new(0),
+            free_head: AtomicU64::new(1),
+            m: 0,
             random,
         }
     }
@@ -283,10 +313,59 @@ impl<R: Fn() -> f32> ListOfSkips<R> {
     }
 }
 
+impl<R: Fn() -> f32> From<ListOfSkips<R>> for Vec<u8> {
+    /// Serializes the list of skips into a byte vector
+    /// Only call when there's no other thread accessing the list
+    fn from(value: ListOfSkips<R>) -> Self {
+        let mut vec = Vec::with_capacity(4 + 24 + value.list.len() * 12);
+        vec.extend_from_slice(&(value.list.len() as u32).to_be_bytes());
+        vec.extend_from_slice(&value.head.load(Relaxed).to_be_bytes());
+        vec.extend_from_slice(&value.free_head.load(Relaxed).to_be_bytes());
+        vec.extend_from_slice(&value.w_next.load(Relaxed).to_be_bytes());
+        vec.extend_from_slice(&value.m.to_be_bytes());
+        for skip in value.list.iter() {
+            vec.extend_from_slice(&skip.next.load(Relaxed).to_be_bytes());
+            vec.extend_from_slice(&skip.length.load(Relaxed).to_be_bytes());
+        }
+        vec
+    }
+}
+
+struct ReservoirSampler<R: Fn() -> f32 + Clone> {
+    random: R,
+    list_of_skips: Option<ListOfSkips<R>>,
+    preload__count: AtomicU32,
+    sample_size: u32,
+    n_threads: u32,
+}
+
+impl<R: Fn() -> f32 + Clone> ReservoirSampler<R> {
+    fn new(sample_size: u32, n_threads: u32, random: R) -> ReservoirSampler<R> {
+        ReservoirSampler {
+            random,
+            list_of_skips: None,
+            preload__count: AtomicU32::new(0),
+            sample_size: 0,
+            n_threads: 0,
+        }
+    }
+}
+
+impl<R: Fn() -> f32 + Clone> From<ReservoirSampler<R>> for Vec<u8> {
+    /// Serializes the list of skips into a byte vector
+    /// Only call when there's no other thread accessing the list
+    fn from(value: ReservoirSampler<R>) -> Self {
+        let mut vec = Vec::new();
+        vec.extend_from_slice(&value.preload__count.load(Relaxed).to_be_bytes());
+
+        vec
+    }
+}
+
 
 #[cfg(test)]
 mod test {
-    use std::{cell::RefCell, sync::Arc, collections::{VecDeque, BTreeMap}};
+    use std::{cell::RefCell, sync::Arc, collections::VecDeque};
 
     use parking_lot::Mutex;
     use rand::{thread_rng, Rng, SeedableRng, rngs::StdRng};
@@ -410,8 +489,8 @@ mod test {
             let los = Arc::new(ListOfSkips::new(num_threads, n_samples, || thread_rng().gen()));
             let mut threads = Vec::new();
             let data = gen_data();
-            let res = Arc::new(Mutex::new(data[0..n_samples].to_vec()));
-            let data = Arc::new(data[n_samples..].to_vec());
+            let res = Arc::new(Mutex::new(data[0..n_samples as usize].to_vec()));
+            let data = Arc::new(data[n_samples as usize..].to_vec());
             for t in 0..num_threads as usize {
                 let los = los.clone();
                 let res = res.clone();
@@ -425,7 +504,7 @@ mod test {
                         loop {
                             if let Some(take) = skip.next() {
                                 if take {
-                                    res.lock()[rng.gen_range(0..n_samples)] = *v;
+                                    res.lock()[rng.gen_range(0..n_samples as usize)] = *v;
                                     drop(lock);
                                     skip = skip.get_new();
                                     lock = t_s[skip.list_index as usize].try_lock().unwrap();
