@@ -44,6 +44,7 @@ use std::sync::atomic::{AtomicU64, AtomicU32};
 use std::sync::atomic::Ordering::Relaxed;
 
 use atomic::Ordering;
+use rand::Rng;
 
 // Quick and Hacky Atomic f32, u32 tuple
 pub struct AtomicF32 {
@@ -331,7 +332,7 @@ impl<R: Fn() -> f32> From<ListOfSkips<R>> for Vec<u8> {
     }
 }
 
-struct ReservoirSampler<R: Fn() -> f32 + Clone> {
+pub struct ReservoirSampler<R: Fn() -> f32 + Clone = fn() -> f32> {
     random: R,
     list_of_skips: Option<ListOfSkips<R>>,
     preload__count: AtomicU32,
@@ -339,17 +340,32 @@ struct ReservoirSampler<R: Fn() -> f32 + Clone> {
     n_threads: u32,
 }
 
+impl ReservoirSampler<fn() -> f32> {
+    pub fn new(sample_size: u32, n_threads: u32) -> ReservoirSampler<fn() -> f32> {
+        ReservoirSampler::with_random(sample_size, n_threads, || rand::random())
+    }
+}
+
 impl<R: Fn() -> f32 + Clone> ReservoirSampler<R> {
-    fn new(sample_size: u32, n_threads: u32, random: R) -> ReservoirSampler<R> {
+
+    fn with_random(sample_size: u32, n_threads: u32, random: R) -> ReservoirSampler<R> {
         ReservoirSampler {
             random,
             list_of_skips: None,
             preload__count: AtomicU32::new(0),
-            sample_size: 0,
-            n_threads: 0,
+            sample_size,
+            n_threads,
         }
     }
 }
+
+// TODO(important): Finish implementing the reservoir sampler including preloading and
+//                  serialization and deserialization of this into a byte vector
+//                  So that we can save the state of the reservoir sampler.
+//                  For preloading the simplest solution is likely, just giving out "0 skips"
+//                  while adding 1 to the preload count before. Whenever the preload count goes
+//                  below 0, we just throw away the list of skips and start over whenever we
+//                  are finished preloading again.
 
 impl<R: Fn() -> f32 + Clone> From<ReservoirSampler<R>> for Vec<u8> {
     /// Serializes the list of skips into a byte vector
@@ -357,7 +373,10 @@ impl<R: Fn() -> f32 + Clone> From<ReservoirSampler<R>> for Vec<u8> {
     fn from(value: ReservoirSampler<R>) -> Self {
         let mut vec = Vec::new();
         vec.extend_from_slice(&value.preload__count.load(Relaxed).to_be_bytes());
-
+        vec.extend_from_slice(&value.sample_size.to_be_bytes());
+        if let Some(los_bytes) = value.list_of_skips.map(|los| Vec::<u8>::from(los)) {
+            vec.extend_from_slice(&los_bytes);
+        }
         vec
     }
 }

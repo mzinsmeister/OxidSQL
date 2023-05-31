@@ -27,7 +27,7 @@ fn gen_bool_thread_rng(p: f64) -> bool {
     rand::thread_rng().gen_bool(p)
 }
 
-struct CountingHyperLogLog<R: Fn(f64) -> bool = fn(f64) -> bool> {
+pub struct CountingHyperLogLog<R: Fn(f64) -> bool = fn(f64) -> bool> {
     buckets: [[AtomicU8; 59]; 64],
     random: R
 }
