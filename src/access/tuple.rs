@@ -1,4 +1,4 @@
-use std::{io::{Cursor, Read, Write}, mem::size_of, ops::DerefMut, borrow::BorrowMut};
+use std::{io::{Cursor, Read, Write}, mem::size_of, ops::{DerefMut, IndexMut, Deref}, borrow::{BorrowMut, Borrow}, marker::PhantomData};
 
 use bitvec::{vec::BitVec, bitvec};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
@@ -6,59 +6,55 @@ use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use crate::types::{TupleValue, TupleValueType};
 
 /*
-We use a null bitmap to indicate which attributes are null. The null bitmap is stored in the first n bytes of the tuple
-where n is the number of attributes in the tuple divided by 8 plus 1 (for the remainder). The null bitmap is stored
-in big endian order. The first bit of the first byte indicates whether the first attribute is null, the second bit
-indicates whether the second attribute is null and so on. The first bit of the second byte indicates whether the
-ninth attribute is null, the second bit indicates whether the tenth attribute is null and so on.
-The benefit of this approach is that we don't have to store the values of null attributes and thus save space.
-The downside is that we have to parse the null bitmap before we can parse the actual values and that we don't have
-constant time access to the values (we have to parse the null bitmap first).
+    We use a null bitmap to indicate which attributes are null. The null bitmap is stored in the first n bytes of the tuple
+    where n is the number of attributes in the tuple divided by 8 plus 1 (for the remainder). The null bitmap is stored
+    in big endian order. The first bit of the first byte indicates whether the first attribute is null, the second bit
+    indicates whether the second attribute is null and so on. The first bit of the second byte indicates whether the
+    ninth attribute is null, the second bit indicates whether the tenth attribute is null and so on.
+    The benefit of this approach is that we don't have to store the values of null attributes and thus save space.
+    The downside is that we have to parse the null bitmap before we can parse the actual values and that we don't have
+    constant time access to the values (we have to parse the null bitmap first).
+
+    The first 4 bytes of the tuple are reserved for flags. The header will likely grow further with transactions
+    and other stuff.
+    Here's the current flag layout:
+    bit | description
+    -----------------
+    0   | was the tuple originally added to the sample if there is one (no update on overwrite)
  */
+// TODO: Implement flags
 #[derive(Debug, PartialEq, Clone)]
-pub struct Tuple {
-    pub values: Vec<Option<TupleValue>>
+pub struct Tuple<V: BorrowMut<Option<TupleValue>> = Option<TupleValue>, C: DerefMut<Target=[V]> = Vec<V>> {
+    flags: u32,
+    pub values: C,
 }
 
-impl Tuple {
+impl<V: BorrowMut<Option<TupleValue>>, C: DerefMut<Target=[V]>> Tuple<V,C> {
 
     #[inline]
-    pub fn new(values: Vec<Option<TupleValue>>) -> Tuple {
-        Tuple { values }
-    }
-
-    #[inline]
-    pub fn parse_binary_all(attributes: &[TupleValueType], src: &[u8]) -> Tuple { 
-        let parse_all = bitvec![1; attributes.len()];
-        Self::parse_binary_partial(attributes, &parse_all, src)
-    }
-
-    #[inline]
-    pub fn parse_binary_partial(attributes: &[TupleValueType], parse_attributes: &BitVec<usize>, src: &[u8]) -> Tuple { 
-        let mut values: Vec<Option<TupleValue>> = vec![None; attributes.len()];
-        Self::parse_binary_partial_into(values.as_mut_slice(), attributes, parse_attributes, src);
-        Tuple { values }
+    pub fn new(values: C) -> Tuple<V,C> {
+        Tuple { values, flags: 0 }
     }
 
     #[inline]
     // Be careful! The length of values needs to be at least the number of 1's set in the parse_attributes BitVec
     // This is done for performance reasons since we can just pass through the attribute descriptions without having to touch
     // The 'values' slice is expected to contain garbage essentially so no need to fill it with 'None's before
-    pub fn parse_binary_partial_into<T>(values: &mut [T], attributes: &[TupleValueType], parse_attributes: &BitVec<usize>, src: &[u8]) where T: BorrowMut<Option<TupleValue>> {
+    pub fn parse_binary_partial_into(tuple: &mut Tuple<V,C>, attributes: &[TupleValueType], parse_attributes: &BitVec<usize>, src: &[u8]) {
         let num_null_bytes = attributes.len() / 8 + 1;
-        let num_null_values: u32 = src.iter().take(num_null_bytes).map(|b| b.count_ones()).sum();
+        // let num_null_values: u32 = src.iter().take(num_null_bytes).map(|b| b.count_ones()).sum();
         let mut cursor = Cursor::new(src);
-        cursor.set_position(num_null_bytes as u64);
+        cursor.set_position(num_null_bytes as u64 + 4);
         let mut var_atts = Vec::new();
         let mut parsed_attributes = 0;
         for (i, attribute_type) in attributes.iter().enumerate() {
-            let null_byte = src[i / 8];
+            let null_byte = src[4 + i / 8];
             let null_bit_mask = 1 <<  (7 - (i % 8));
             if null_byte & null_bit_mask == 0 {
                 match attribute_type {
                     TupleValueType::BigInt => {
                         if parse_attributes[i] {
-                            *(values[parsed_attributes].borrow_mut()) = Some(TupleValue::BigInt(cursor.read_i64::<BigEndian>().unwrap()));
+                            *(tuple.values[parsed_attributes].borrow_mut()) = Some(TupleValue::BigInt(cursor.read_i64::<BigEndian>().unwrap()));
                             parsed_attributes += 1;
                         } else {
                             cursor.set_position(cursor.position() + size_of::<i64>() as u64);
@@ -72,7 +68,7 @@ impl Tuple {
                     }
                     TupleValueType::Int => {
                         if parse_attributes[i] {
-                            *(values[parsed_attributes].borrow_mut()) = Some(TupleValue::Int(cursor.read_i32::<BigEndian>().unwrap()));
+                            *(tuple.values[parsed_attributes].borrow_mut()) = Some(TupleValue::Int(cursor.read_i32::<BigEndian>().unwrap()));
                             parsed_attributes += 1;
                         } else {
                            cursor.set_position(cursor.position() + size_of::<i32>() as u64);
@@ -80,7 +76,7 @@ impl Tuple {
                     },
                     TupleValueType::SmallInt => {
                         if parse_attributes[i] {
-                            *(values[parsed_attributes].borrow_mut()) = Some(TupleValue::SmallInt(cursor.read_i16::<BigEndian>().unwrap()));
+                            *(tuple.values[parsed_attributes].borrow_mut()) = Some(TupleValue::SmallInt(cursor.read_i16::<BigEndian>().unwrap()));
                             parsed_attributes += 1;
                         } else {
                             cursor.set_position(cursor.position() + size_of::<i16>() as u64);
@@ -88,7 +84,7 @@ impl Tuple {
                     },
                 }
             } else if parse_attributes[i] {
-                *(values[parsed_attributes].borrow_mut()) = None;
+                *(tuple.values[parsed_attributes].borrow_mut()) = None;
                 parsed_attributes += 1;
             }
         }
@@ -99,7 +95,7 @@ impl Tuple {
                     if parse {
                         let mut string = String::with_capacity(length as usize);
                         cursor.read_to_string(&mut string).unwrap();
-                        *(values[tuple_index].borrow_mut()) = Some(TupleValue::String(string));
+                        *(tuple.values[tuple_index].borrow_mut()) = Some(TupleValue::String(string));
                     } else {
                         cursor.set_position(cursor.position() + length as u64)
                     }
@@ -109,10 +105,28 @@ impl Tuple {
         }
     }
 
+}
+
+impl Tuple {
+
+    #[inline]
+    pub fn parse_binary_all(attributes: &[TupleValueType], src: &[u8]) -> Tuple { 
+        let parse_all = bitvec![1; attributes.len()];
+        Self::parse_binary_partial(attributes, &parse_all, src)
+    }
+
+    #[inline]
+    pub fn parse_binary_partial(attributes: &[TupleValueType], parse_attributes: &BitVec<usize>, src: &[u8]) -> Tuple { 
+        let values: Vec<Option<TupleValue>> = vec![None; attributes.len()];
+        let mut tuple = Tuple::new(values);
+        Self::parse_binary_partial_into(&mut tuple, attributes, parse_attributes, src);
+        tuple
+    }
+
     #[inline]
     pub fn calculate_binary_length(&self) -> usize {
         let num_null_bytes = self.values.len() / 8 + 1;
-        let mut length = num_null_bytes;
+        let mut length = num_null_bytes + 4;
         for value in self.values.iter() {
             if let Some(value) = value {
                 match value {
@@ -141,6 +155,8 @@ impl Tuple {
         let mut null_bytes = vec![0u8; num_null_bytes];
         let mut var_atts = Vec::new();
         let mut cursor = Cursor::new(buffer);
+        // first write a placeholder for the flags bitmap
+        cursor.write_u32::<BigEndian>(0).unwrap();
         // first write a placeholder for the null bitmap
         cursor.write(&null_bytes).unwrap();
         for (i, value) in self.values.iter().enumerate() {
@@ -176,7 +192,7 @@ impl Tuple {
             cursor.write_u16::<BigEndian>(value.len() as u16).unwrap();
             cursor.set_position(position);
         }
-        cursor.set_position(0);
+        cursor.set_position(4);
         cursor.write(&null_bytes).unwrap();
     }
 
@@ -221,11 +237,11 @@ impl TupleParser {
 pub struct MutatingTupleParser<'a, V: BorrowMut<Option<TupleValue>> + 'a> {
     attributes: Vec<TupleValueType>,
     parse_attributes: BitVec,
-    values: &'a mut [V]
+    values: Tuple<V, &'a mut[V]>
 }
 
 impl<'a, V: BorrowMut<Option<TupleValue>> + 'a> MutatingTupleParser<'a, V> {
-    pub fn new(attributes: Vec<TupleValueType>, parse_attributes: BitVec, values: &'a mut [V]) -> Self {
+    pub fn new(attributes: Vec<TupleValueType>, parse_attributes: BitVec, values: Tuple<V, &'a mut[V]>) -> Self {
         MutatingTupleParser {
             attributes,
             parse_attributes,
@@ -234,11 +250,11 @@ impl<'a, V: BorrowMut<Option<TupleValue>> + 'a> MutatingTupleParser<'a, V> {
     }
 
     pub fn parse(&mut self, val: &[u8]) {
-        Tuple::parse_binary_partial_into(self.values, &self.attributes, &self.parse_attributes, val)
+        Tuple::parse_binary_partial_into(&mut self.values, &self.attributes, &self.parse_attributes, val)
     }
 
     pub fn values(&self) -> &[V] {
-        self.values
+        self.values.values
     }
 }
 
@@ -249,7 +265,7 @@ mod test {
 
     use super::*;
 
-    const TEST_BINARY: &[u8] = &[0b10000000, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x02, 'a' as u8, 'b' as u8];
+    const TEST_BINARY: &[u8] = &[0x00, 0x00, 0x00, 0x00, 0b10000000, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x02, 'a' as u8, 'b' as u8];
 
     #[test]
     fn test_parse_binary() {
@@ -271,6 +287,7 @@ mod test {
     #[test]
     fn test_write_binary() {
         let tuple = Tuple {
+            flags: 0,
             values: vec![
                 None,
                 Some(TupleValue::String("ab".to_string())),
@@ -287,6 +304,7 @@ mod test {
     #[test]
     fn test_write_parse() {
         let tuple = Tuple {
+            flags: 0,
             values: vec![
                 None,
                 Some(TupleValue::String("ab".to_string())),

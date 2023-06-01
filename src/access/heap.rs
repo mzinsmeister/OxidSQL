@@ -36,7 +36,7 @@ pub trait HeapStorage<B: BufferManager> {
     fn scan<P: Fn(&Tuple) -> bool>(&self, attributes: BitVec<usize>, predicate: P) -> Result<Self::ScanIterator<P>, B::BError>;
     // Convenience function that just gives us all attributes
     fn scan_all<P: Fn(&Tuple) -> bool>(&self, predicate: P) -> Result<Self::ScanIterator<P>, B::BError>;
-    fn scan_to_values<'a, V, P>(&self, values: &'a mut [V], 
+    fn scan_to_tuple<'a, V, P>(&self,  tuple: Tuple<V, &'a mut [V]>, 
                                 attributes: BitVec<usize>,  
                                 predicate: P) -> Result<Self::MutatingScanIterator<'a, V, P>, B::BError> 
         where V: BorrowMut<Option<TupleValue>> + 'a, P: Fn(&[V]) -> bool;
@@ -96,11 +96,11 @@ impl<B: BufferManager> HeapStorage<B> for SlottedPageHeapStorage<B> {
         self.scan(bitvec![1;self.attributes.len()], predicate)
     }
 
-    fn scan_to_values<'a, V, P>(&self, values: &'a mut [V], 
+    fn scan_to_tuple<'a, V, P>(&self, tuple: Tuple<V, &'a mut [V]>, 
                                 attributes: BitVec<usize>,  
                                 predicate: P) -> Result<Self::MutatingScanIterator<'a, V, P>, <B as BufferManager>::BError> 
         where V: BorrowMut<Option<TupleValue>> + 'a, P: Fn(&[V]) -> bool  {
-        let parser = MutatingTupleParser::new(self.attributes.clone(), attributes, values);
+        let parser = MutatingTupleParser::new(self.attributes.clone(), attributes, tuple);
         let predicate_parser = PredicateMutatingTupleParser(parser, predicate, PhantomData);
         let scan = self.segment.clone().scan(predicate_parser);
         Ok(SlottedPageMutatingHeapStorageScan { scan, _phantom: PhantomData })
