@@ -127,8 +127,8 @@ fn parse_select(rest_query: &str) -> IResult<&str, ParseTree> {
     let (rest_query, _) = tag_no_case("FROM")(rest_query)?;
     let (rest_query, _) = multispace1(rest_query)?;
     let (rest_query, from) = parse_sql_from_list(rest_query)?;
-    let (_, where_clause) = opt(parse_where_and_where_clause)(rest_query)?;
-    Ok(("", ParseTree::Select(SelectParseTree { columns: select, from_tables: from, where_clause })))
+    let (rest_query, where_clause) = opt(parse_where_and_where_clause)(rest_query)?;
+    Ok((rest_query, ParseTree::Select(SelectParseTree { columns: select, from_tables: from, where_clause })))
 }
 
 fn parse_sql_star(rest_query: & str) -> IResult<&str, Option<Vec<BoundParseAttribute>>> {
@@ -282,11 +282,11 @@ fn parse_insert(rest_query: &str) -> IResult<&str, ParseTree> {
     let (rest_query, _) = multispace1(rest_query)?;
     let (rest_query, _) = tag_no_case("VALUES")(rest_query)?;
     let (rest_query, _) = multispace1(rest_query)?;
-    let (_, values) = delimited(
+    let (rest_query, values) = delimited(
         with_optional_whitespace_padding(is_a("(")),
         separated_list1(parse_sql_list_separator,alt((parse_string_value, parse_long_value))),
         with_optional_whitespace_padding(is_a(")")))(rest_query)?;
-    Ok(("", ParseTree::Insert(InsertParseTree { table: table_name, values })))
+    Ok((rest_query, ParseTree::Insert(InsertParseTree { table: table_name, values })))
 }
 
 fn is_sql_identifier_char(char: char) -> bool {

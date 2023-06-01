@@ -34,7 +34,10 @@ impl OxidSQLDatabase {
     }
 
     pub fn query<'a>(&self, query: &'a str) -> Result<(), Box<dyn std::error::Error + 'a>> {
-        let (_, parse_tree) = parser::parse_query(query)?;
+        let (rest_query, parse_tree) = parser::parse_query(query)?;
+        if rest_query.trim().len() > 0 {
+            return Err(format!("Query was not parsed fully. Trailing suffix: '{}'", rest_query).into());
+        }
         let analyzed_query = self.analyzer.analyze(parse_tree)?;
         let plan = self.planner.plan(&analyzed_query)?;
         self.executor.execute(plan, self.buffer_manager.clone())?;
