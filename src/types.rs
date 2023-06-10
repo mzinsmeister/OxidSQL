@@ -33,7 +33,8 @@ pub enum TupleValueType {
     BigInt = 0,
     VarChar(u16) = 1,
     Int = 2,
-    SmallInt = 3
+    SmallInt = 3,
+    VarBinary(u16) = 4,
 }
 
 impl TupleValueType {
@@ -42,7 +43,8 @@ impl TupleValueType {
             TupleValueType::BigInt => Some(8),
             TupleValueType::VarChar(_) => None,
             TupleValueType::Int => Some(4),
-            TupleValueType::SmallInt => Some(2)
+            TupleValueType::SmallInt => Some(2),
+            TupleValueType::VarBinary(_) => None,
         }
     }
 
@@ -58,6 +60,10 @@ impl TupleValueType {
             },
             TupleValueType::VarChar(_) => match other {
                 TupleValueType::VarChar(_) => true,
+                _ => false
+            },
+            TupleValueType::VarBinary(_) => match other {
+                TupleValueType::VarBinary(_) => true,
                 _ => false
             },
         }
@@ -77,6 +83,10 @@ impl TupleValueType {
                 TupleValue::String(_) => true,
                 _ => false
             },
+            TupleValueType::VarBinary(_) => match value {
+                TupleValue::ByteArray(_) => true,
+                _ => false
+            },
         }
     }
 }
@@ -87,7 +97,8 @@ impl Display for TupleValueType {
             TupleValueType::BigInt => write!(f, "BIGINT"),
             TupleValueType::VarChar(size) => write!(f, "VARCHAR({})", size),
             TupleValueType::Int => write!(f, "INT"),
-            TupleValueType::SmallInt => write!(f, "SMALLINT")
+            TupleValueType::SmallInt => write!(f, "SMALLINT"),
+            TupleValueType::VarBinary(size) => write!(f, "VARBINARY({})", size),
         }
     }
 }
@@ -98,6 +109,7 @@ pub enum TupleValue {
     Int(i32),
     SmallInt(i16),
     String(String),
+    ByteArray(Box<[u8]>),
     // Float(f64),
     // Bool(bool),
     // Null,
@@ -125,9 +137,16 @@ impl TupleValue {
         }
     }
 
-    pub fn as_varchar(&self) -> &str {
+    pub fn as_string(&self) -> &str {
         match self {
             TupleValue::String(value) => value,
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn as_byte_array(&self) -> &[u8] {
+        match self {
+            TupleValue::ByteArray(value) => value,
             _ => unreachable!(),
         }
     }
@@ -147,6 +166,7 @@ impl PartialEq for TupleValue {
             (TupleValue::Int(a), TupleValue::SmallInt(b)) => *a == *b as i32,
             (TupleValue::SmallInt(a), TupleValue::BigInt(b)) => *a as i64 == *b,
             (TupleValue::SmallInt(a), TupleValue::Int(b)) => *a as i32 == *b,
+            (TupleValue::ByteArray(a), TupleValue::ByteArray(b)) => a == b,
             _ => false
         }
     }
@@ -168,6 +188,7 @@ impl PartialOrd for TupleValue {
             (TupleValue::Int(a), TupleValue::SmallInt(b)) => a.partial_cmp(&(*b as i32)),
             (TupleValue::SmallInt(a), TupleValue::BigInt(b)) => (*a as i64).partial_cmp(b),
             (TupleValue::SmallInt(a), TupleValue::Int(b)) => (*a as i32).partial_cmp(b),
+            (TupleValue::ByteArray(a), TupleValue::ByteArray(b)) => a.partial_cmp(b),
             _ => None
         }
     }
@@ -180,6 +201,7 @@ impl Display for TupleValue {
             TupleValue::Int(i) => write!(f, "{}", i),
             TupleValue::SmallInt(i) => write!(f, "{}", i),
             TupleValue::String(s) => write!(f, "\"{}\"", s.escape_debug()),
+            TupleValue::ByteArray(b) => write!(f, "0x{}", hex::encode(b)),
         }
     }
 }
@@ -204,6 +226,7 @@ mod tests {
         // String comparisons
         assert_eq!(TupleValue::String("hello".to_string()), TupleValue::String("hello".to_string()));
         assert_ne!(TupleValue::String("hello".to_string()), TupleValue::String("world".to_string()));
+        assert_eq!(TupleValue::ByteArray(vec![0x01, 0x02, 0x03].into_boxed_slice()), TupleValue::ByteArray(vec![0x01, 0x02, 0x03].into_boxed_slice()));
 
         // Non-equal comparisons
         assert_ne!(TupleValue::BigInt(10), TupleValue::BigInt(20));
@@ -216,6 +239,7 @@ mod tests {
         assert_ne!(TupleValue::SmallInt(2), TupleValue::BigInt(5));
         assert_ne!(TupleValue::SmallInt(2), TupleValue::Int(5));
         assert_ne!(TupleValue::String("hello".to_string()), TupleValue::String("world".to_string()));
+        assert_ne!(TupleValue::ByteArray(vec![0x01, 0x02, 0x03].into_boxed_slice()), TupleValue::ByteArray(vec![0x01, 0x02, 0x04].into_boxed_slice()));
     }
 
     #[test]
@@ -236,9 +260,16 @@ mod tests {
         assert_eq!(TupleValue::String("hello".to_string()).partial_cmp(&TupleValue::String("world".to_string())), Some(std::cmp::Ordering::Less));
         assert_eq!(TupleValue::String("world".to_string()).partial_cmp(&TupleValue::String("hello".to_string())), Some(std::cmp::Ordering::Greater));
 
+        // ByteArray comparisons
+        assert_eq!(TupleValue::ByteArray(vec![0x01, 0x02, 0x03].into_boxed_slice()).partial_cmp(&TupleValue::ByteArray(vec![0x01, 0x02, 0x03].into_boxed_slice())), Some(std::cmp::Ordering::Equal));
+        assert_eq!(TupleValue::ByteArray(vec![0x01, 0x02, 0x03].into_boxed_slice()).partial_cmp(&TupleValue::ByteArray(vec![0x01, 0x02, 0x04].into_boxed_slice())), Some(std::cmp::Ordering::Less));
+        assert_eq!(TupleValue::ByteArray(vec![0x01, 0x02, 0x04].into_boxed_slice()).partial_cmp(&TupleValue::ByteArray(vec![0x01, 0x02, 0x03].into_boxed_slice())), Some(std::cmp::Ordering::Greater));
+
+
         // Non-comparable types
         assert_eq!(TupleValue::BigInt(10).partial_cmp(&TupleValue::String("hello".to_string())), None);
         assert_eq!(TupleValue::String("hello".to_string()).partial_cmp(&TupleValue::BigInt(10)), None);
+        assert_eq!(TupleValue::BigInt(10).partial_cmp(&TupleValue::ByteArray(vec![0x01, 0x02, 0x03].into_boxed_slice())), None);
     }
 
     #[test]
@@ -256,6 +287,9 @@ mod tests {
         assert!(TupleValueType::VarChar(10).is_comparable_to(&TupleValueType::VarChar(20)));
         assert!(!TupleValueType::VarChar(10).is_comparable_to(&TupleValueType::BigInt));
         assert!(!TupleValueType::BigInt.is_comparable_to(&TupleValueType::VarChar(10)));
+        assert!(TupleValueType::VarBinary(2).is_comparable_to(&TupleValueType::VarBinary(5)));
+        assert!(!TupleValueType::VarBinary(4).is_comparable_to(&TupleValueType::BigInt));
+        assert!(!TupleValueType::BigInt.is_comparable_to(&TupleValueType::VarBinary(10)));
     }
 
     #[test]
@@ -272,6 +306,9 @@ mod tests {
         assert!(TupleValueType::VarChar(10).is_comparable_to_value(&TupleValue::String("hello".to_string())));
         assert!(!TupleValueType::VarChar(10).is_comparable_to_value(&TupleValue::BigInt(10)));
         assert!(!TupleValueType::BigInt.is_comparable_to_value(&TupleValue::String("hello".to_string())));
+        assert!(TupleValueType::VarBinary(2).is_comparable_to_value(&TupleValue::ByteArray(vec![0x01, 0x02].into_boxed_slice())));
+        assert!(!TupleValueType::VarBinary(4).is_comparable_to_value(&TupleValue::BigInt(10)));
+        assert!(!TupleValueType::BigInt.is_comparable_to_value(&TupleValue::ByteArray(vec![0x01, 0x02].into_boxed_slice())));
     }
 }
 

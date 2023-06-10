@@ -336,7 +336,8 @@ impl From<&AttributeDesc> for Tuple {
             TupleValueType::BigInt => (0, 0),
             TupleValueType::VarChar(length) => (1, length as i32),
             TupleValueType::Int => (2, 0),
-            TupleValueType::SmallInt => (3, 0)
+            TupleValueType::SmallInt => (3, 0),
+            TupleValueType::VarBinary(length) => (4, length as i32)
         };
         let integrity_constraint_flags = if value.nullable { 0 } else { 1 };
         Tuple::new(vec![

@@ -65,7 +65,13 @@ impl<V: BorrowMut<Option<TupleValue>>, C: DerefMut<Target=[V]>> Tuple<V,C> {
                         if parse_attributes[i] {
                             parsed_attributes += 1;
                         }
-                    }
+                    },
+                    TupleValueType::VarBinary(_) => {
+                        var_atts.push((parsed_attributes, attribute_type, cursor.read_u16::<BigEndian>().unwrap(), parse_attributes[i]));
+                        if parse_attributes[i] {
+                            parsed_attributes += 1;
+                        }
+                    },
                     TupleValueType::Int => {
                         if parse_attributes[i] {
                             *(tuple.values[parsed_attributes].borrow_mut()) = Some(TupleValue::Int(cursor.read_i32::<BigEndian>().unwrap()));
@@ -100,6 +106,15 @@ impl<V: BorrowMut<Option<TupleValue>>, C: DerefMut<Target=[V]>> Tuple<V,C> {
                         cursor.set_position(cursor.position() + length as u64)
                     }
                 },
+                TupleValueType::VarBinary(_) => {
+                    if parse {
+                        let mut bytes = vec![0; length as usize];
+                        cursor.read_exact(&mut bytes).unwrap();
+                        *(tuple.values[tuple_index].borrow_mut()) = Some(TupleValue::ByteArray(bytes.into_boxed_slice()));
+                    } else {
+                        cursor.set_position(cursor.position() + length as u64)
+                    }
+                }
                 _ => unreachable!() // No other variable sized types
             }
         }
