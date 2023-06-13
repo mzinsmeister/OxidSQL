@@ -1,5 +1,7 @@
 use std::fmt::Display;
 
+use petgraph::data;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RelationTID {
     pub page_id: u64, // only current segment (48 bits max)
@@ -103,6 +105,14 @@ impl Display for TupleValueType {
     }
 }
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TupleValueConversionError {
+    TypeNotConvertible,
+    ValueOverflow,
+    TooLarge
+}
+
 #[derive(Debug, Clone, Hash)]
 pub enum TupleValue {
     BigInt(i64),
@@ -149,6 +159,49 @@ impl TupleValue {
             TupleValue::ByteArray(value) => value,
             _ => unreachable!(),
         }
+    }
+
+    pub fn try_convert_to(&self, data_type: TupleValueType) -> Result<TupleValue, TupleValueConversionError> {
+        match data_type {
+            TupleValueType::BigInt => match self {
+                TupleValue::BigInt(value) => Ok(TupleValue::BigInt(*value)),
+                TupleValue::Int(value) => Ok(TupleValue::BigInt(*value as i64)),
+                TupleValue::SmallInt(value) => Ok(TupleValue::BigInt(*value as i64)),
+                _ => Err(TupleValueConversionError::TypeNotConvertible)
+            },
+            TupleValueType::Int => match self {
+                TupleValue::BigInt(value) => value.checked_abs().and_then(|v| v.try_into().ok()).map(TupleValue::Int).ok_or(TupleValueConversionError::ValueOverflow),
+                TupleValue::Int(value) => Ok(TupleValue::Int(*value)),
+                TupleValue::SmallInt(value) => Ok(TupleValue::Int(*value as i32)),
+                _ => Err(TupleValueConversionError::TypeNotConvertible)
+            },
+            TupleValueType::SmallInt => match self {
+                TupleValue::BigInt(value) => value.checked_abs().and_then(|v| v.try_into().ok()).map(TupleValue::SmallInt).ok_or(TupleValueConversionError::ValueOverflow),
+                TupleValue::Int(value) => value.checked_abs().and_then(|v| v.try_into().ok()).map(TupleValue::SmallInt).ok_or(TupleValueConversionError::ValueOverflow),
+                TupleValue::SmallInt(value) => Ok(TupleValue::SmallInt(*value)),
+                _ => Err(TupleValueConversionError::TypeNotConvertible)
+            },
+            TupleValueType::VarChar(size) => match self {
+                TupleValue::String(value) => {
+                    if value.len() > size as usize {
+                        Err(TupleValueConversionError::TooLarge)
+                    } else {
+                        Ok(TupleValue::String(value.clone()))
+                    }
+                },
+                _ => Err(TupleValueConversionError::TypeNotConvertible)
+            },
+            TupleValueType::VarBinary(size) => match self {
+                TupleValue::ByteArray(value) => {
+                    if value.len() > size as usize {
+                        Err(TupleValueConversionError::TooLarge)
+                    } else {
+                        Ok(TupleValue::ByteArray(value.clone()))
+                    }
+                },
+                _ => Err(TupleValueConversionError::TypeNotConvertible)
+            },
+            }
     }
 }
 
@@ -309,6 +362,40 @@ mod tests {
         assert!(TupleValueType::VarBinary(2).is_comparable_to_value(&TupleValue::ByteArray(vec![0x01, 0x02].into_boxed_slice())));
         assert!(!TupleValueType::VarBinary(4).is_comparable_to_value(&TupleValue::BigInt(10)));
         assert!(!TupleValueType::BigInt.is_comparable_to_value(&TupleValue::ByteArray(vec![0x01, 0x02].into_boxed_slice())));
+    }
+
+    #[test]
+    fn test_try_convert_to() {
+        assert_eq!(TupleValue::BigInt(10).try_convert_to(TupleValueType::BigInt), Ok(TupleValue::BigInt(10)));
+        assert_eq!(TupleValue::BigInt(10).try_convert_to(TupleValueType::Int), Ok(TupleValue::Int(10)));
+        assert_eq!(TupleValue::BigInt(10).try_convert_to(TupleValueType::SmallInt), Ok(TupleValue::SmallInt(10)));
+        assert_eq!(TupleValue::Int(10).try_convert_to(TupleValueType::BigInt), Ok(TupleValue::BigInt(10)));
+        assert_eq!(TupleValue::Int(10).try_convert_to(TupleValueType::Int), Ok(TupleValue::Int(10)));
+        assert_eq!(TupleValue::Int(10).try_convert_to(TupleValueType::SmallInt), Ok(TupleValue::SmallInt(10)));
+        assert_eq!(TupleValue::SmallInt(10).try_convert_to(TupleValueType::BigInt), Ok(TupleValue::BigInt(10)));
+        assert_eq!(TupleValue::SmallInt(10).try_convert_to(TupleValueType::Int), Ok(TupleValue::Int(10)));
+        assert_eq!(TupleValue::SmallInt(10).try_convert_to(TupleValueType::SmallInt), Ok(TupleValue::SmallInt(10)));
+        assert_eq!(TupleValue::String("hello".to_string()).try_convert_to(TupleValueType::VarChar(10)), Ok(TupleValue::String("hello".to_string())));
+        assert_eq!(TupleValue::String("hello".to_string()).try_convert_to(TupleValueType::VarChar(5)), Ok(TupleValue::String("hello".to_string())));
+        assert_eq!(TupleValue::String("hello".to_string()).try_convert_to(TupleValueType::VarChar(20)), Ok(TupleValue::String("hello".to_string())));
+        assert_eq!(TupleValue::String("hello".to_string()).try_convert_to(TupleValueType::VarChar(3)), Err(TupleValueConversionError::TooLarge));
+        assert_eq!(TupleValue::String("hello".to_string()).try_convert_to(TupleValueType::VarBinary(10)), Err(TupleValueConversionError::TypeNotConvertible));
+        assert_eq!(TupleValue::BigInt(i64::MAX).try_convert_to(TupleValueType::Int), Err(TupleValueConversionError::ValueOverflow));
+        assert_eq!(TupleValue::BigInt(i64::MIN).try_convert_to(TupleValueType::Int), Err(TupleValueConversionError::ValueOverflow));
+        assert_eq!(TupleValue::BigInt(i64::MAX).try_convert_to(TupleValueType::SmallInt), Err(TupleValueConversionError::ValueOverflow));
+        assert_eq!(TupleValue::BigInt(i64::MIN).try_convert_to(TupleValueType::SmallInt), Err(TupleValueConversionError::ValueOverflow));
+        assert_eq!(TupleValue::Int(i32::MAX).try_convert_to(TupleValueType::SmallInt), Err(TupleValueConversionError::ValueOverflow));
+        assert_eq!(TupleValue::Int(i32::MIN).try_convert_to(TupleValueType::SmallInt), Err(TupleValueConversionError::ValueOverflow));
+        assert_eq!(TupleValue::BigInt(10).try_convert_to(TupleValueType::VarBinary(10)), Err(TupleValueConversionError::TypeNotConvertible));
+        assert_eq!(TupleValue::ByteArray(vec![0x01, 0x02].into_boxed_slice()).try_convert_to(TupleValueType::VarBinary(2)), Ok(TupleValue::ByteArray(vec![0x01, 0x02].into_boxed_slice())));
+        assert_eq!(TupleValue::ByteArray(vec![0x01, 0x02].into_boxed_slice()).try_convert_to(TupleValueType::VarBinary(4)), Ok(TupleValue::ByteArray(vec![0x01, 0x02].into_boxed_slice())));
+        assert_eq!(TupleValue::ByteArray(vec![0x01, 0x02].into_boxed_slice()).try_convert_to(TupleValueType::VarBinary(1)), Err(TupleValueConversionError::TooLarge));
+        assert_eq!(TupleValue::ByteArray(vec![0x01, 0x02].into_boxed_slice()).try_convert_to(TupleValueType::BigInt), Err(TupleValueConversionError::TypeNotConvertible));
+        assert_eq!(TupleValue::BigInt(10).try_convert_to(TupleValueType::VarChar(10)), Err(TupleValueConversionError::TypeNotConvertible));
+        assert_eq!(TupleValue::Int(10).try_convert_to(TupleValueType::VarChar(10)), Err(TupleValueConversionError::TypeNotConvertible));
+        assert_eq!(TupleValue::SmallInt(10).try_convert_to(TupleValueType::VarChar(10)), Err(TupleValueConversionError::TypeNotConvertible));
+        assert_eq!(TupleValue::ByteArray(vec![0x01, 0x02].into_boxed_slice()).try_convert_to(TupleValueType::VarChar(10)), Err(TupleValueConversionError::TypeNotConvertible));
+        assert_eq!(TupleValue::String("test".to_string()).try_convert_to(TupleValueType::VarBinary(10)), Err(TupleValueConversionError::TypeNotConvertible));
     }
 }
 

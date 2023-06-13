@@ -7,9 +7,9 @@ pub mod bottomup;
 
 use std::{collections::BTreeMap, fmt::{Formatter, Debug, Display}};
 
-use crate::{catalog::{AttributeDesc, TableDesc}, types::TupleValue, execution::plan::PhysicalQueryPlan};
+use crate::{catalog::{AttributeDesc, TableDesc}, types::TupleValue, execution::plan::PhysicalQueryPlan, access::tuple::Tuple};
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct BoundTable {
     pub table: TableDesc,
     pub binding: Option<String>
@@ -84,7 +84,17 @@ impl BoundAttributeRef {
     }
 }
 
-pub struct Query {
+#[derive(Debug, Clone)]
+pub enum Query {
+    Select(SelectQuery),
+    Insert(InsertQuery),
+    CreateTable(CreateTableQuery),
+    //Update(UpdateQuery),
+    //Delete(DeleteQuery)
+}
+
+#[derive(Debug, Clone)]
+pub struct SelectQuery {
     pub select: Vec<BoundAttribute>,
     pub from: BTreeMap<BoundTableRef, BoundTable>,
     pub selections: Vec<Selection>,
@@ -107,11 +117,24 @@ pub struct Selection {
     pub operator: SelectionOperator
 }
 
-pub trait Planner {
-    fn plan(&self, query: &Query) -> Result<PhysicalQueryPlan, PlannerError>;
+#[derive(Debug, Clone)]
+pub struct InsertQuery {
+    pub table: TableDesc,
+    pub values: Vec<Tuple>
 }
 
- pub enum PlannerError {}
+#[derive(Debug, Clone)]
+pub struct CreateTableQuery {
+    pub table: TableDesc
+}
+
+pub trait Planner {
+    fn plan(&self, query: Query) -> Result<PhysicalQueryPlan, PlannerError>;
+}
+
+ pub enum PlannerError {
+    Other(Box<dyn std::error::Error>)
+ }
 
  impl Debug for PlannerError {
      fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {

@@ -25,7 +25,7 @@ use crate::types::{TupleValue, TupleValueType};
 // TODO: Implement flags
 #[derive(Debug, PartialEq, Clone)]
 pub struct Tuple<V: BorrowMut<Option<TupleValue>> = Option<TupleValue>, C: DerefMut<Target=[V]> = Vec<V>> {
-    flags: u32,
+    pub flags: u32,
     pub values: C,
 }
 
@@ -157,6 +157,9 @@ impl Tuple {
                     TupleValue::SmallInt(_) => {
                         length += 2;
                     },
+                    TupleValue::ByteArray(value) => {
+                        length += value.len() + 2;
+                    },
                     _ => panic!("Cannot write data {:#?} at the moment", value)
                 }
             }
@@ -181,7 +184,7 @@ impl Tuple {
                         cursor.write_i64::<BigEndian>(*value).unwrap();
                     },
                     TupleValue::String(value) => {
-                        var_atts.push((cursor.position(), value));
+                        var_atts.push((cursor.position(), value.as_bytes()));
                         cursor.write_u16::<BigEndian>(0).unwrap(); // Write 0 as placeholder
                     }
                     TupleValue::Int(value) => {
@@ -189,6 +192,10 @@ impl Tuple {
                     },
                     TupleValue::SmallInt(value) => {
                         cursor.write_i16::<BigEndian>(*value).unwrap();
+                    },
+                    TupleValue::ByteArray(value) => {
+                        var_atts.push((cursor.position(), value));
+                        cursor.write_u16::<BigEndian>(0).unwrap(); // Write 0 as placeholder
                     },
                     _ => panic!("Cannot write data {:#?} at the moment", value)
                 }
@@ -200,7 +207,7 @@ impl Tuple {
         }
         // now write the variable length attributes
         for (index, value) in var_atts {
-            cursor.write(value.as_bytes()).unwrap();
+            cursor.write(value).unwrap();
             cursor.set_position(index as u64);
             let position = cursor.position();
             cursor.set_position(index);

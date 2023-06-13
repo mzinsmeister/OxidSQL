@@ -270,7 +270,7 @@ fn parse_or_and_right<'a>(rest_query: &'a str, left_side: ParseWhereClause<'a>)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InsertParseTree<'a> {
     pub table: &'a str,
-    pub values: Vec<TupleValue>
+    pub values: Vec<Option<TupleValue>>
 }
 
 fn parse_insert(rest_query: &str) -> IResult<&str, ParseTree> {
@@ -284,7 +284,7 @@ fn parse_insert(rest_query: &str) -> IResult<&str, ParseTree> {
     let (rest_query, _) = multispace1(rest_query)?;
     let (rest_query, values) = delimited(
         with_optional_whitespace_padding(is_a("(")),
-        separated_list1(parse_sql_list_separator,alt((parse_string_value, parse_long_value))),
+        separated_list1(parse_sql_list_separator,alt((parse_null, parse_string_value, parse_long_value))),
         with_optional_whitespace_padding(is_a(")")))(rest_query)?;
     Ok((rest_query, ParseTree::Insert(InsertParseTree { table: table_name, values })))
 }
@@ -293,15 +293,20 @@ fn is_sql_identifier_char(char: char) -> bool {
     is_alphanumeric(char as u8) || char == '_'
 }
 
-fn parse_string_value(rest_query: &str) -> IResult<&str, TupleValue> {
-    let (rest_query, string) = delimited(
-        char('\''), is_not("'"), char('\''))(rest_query)?;
-    Ok((rest_query, TupleValue::String(String::from(string))))
+fn parse_null(rest_query: &str) -> IResult<&str, Option<TupleValue>> {
+    let (rest_query, _) = tag_no_case("NULL")(rest_query)?;
+    Ok((rest_query, None))
 }
 
-fn parse_long_value(rest_query: &str) -> IResult<&str, TupleValue> {
+fn parse_string_value(rest_query: &str) -> IResult<&str, Option<TupleValue>> {
+    let (rest_query, string) = delimited(
+        char('\''), is_not("'"), char('\''))(rest_query)?;
+    Ok((rest_query, Some(TupleValue::String(String::from(string)))))
+}
+
+fn parse_long_value(rest_query: &str) -> IResult<&str, Option<TupleValue>> {
     let (rest_query, value) = map_res(digit1, str::parse::<i64>)(rest_query)?;
-    Ok((rest_query, TupleValue::BigInt(value)))
+    Ok((rest_query, Some(TupleValue::BigInt(value))))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -381,6 +386,8 @@ fn parse_column_definition(rest_query: &str) -> IResult<&str, TableDefinitionIte
 fn parse_sql_type(rest_query: &str) -> IResult<&str, TupleValueType> {
     alt((
         map(tag_no_case("BIGINT"), |_| TupleValueType::BigInt),
+        map(tag_no_case("INT"), |_| TupleValueType::Int),
+        map(tag_no_case("SMALLINT"), |_| TupleValueType::SmallInt),
         map(tuple((
             tag_no_case("VARCHAR"),
             delimited(

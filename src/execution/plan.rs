@@ -12,7 +12,7 @@
 
 use std::fmt::Debug;
 
-use crate::{types::TupleValue, catalog::TableDesc};
+use crate::{types::TupleValue, catalog::TableDesc, access::tuple::Tuple};
 
 pub type IURef = usize; // index of child operator's output
 
@@ -54,6 +54,16 @@ pub type IURef = usize; // index of child operator's output
      Print {
         input: Box<PhysicalQueryPlanOperator>,
         tuple_writer: Box<dyn TupleWriter>,
+    },
+    InlineTable {
+        tuples: Vec<Tuple>,
+    },
+    Insert {
+        input: Box<PhysicalQueryPlanOperator>,
+        table: TableDesc,
+    },
+    CreateTable {
+        table: TableDesc,
     }
  }
 

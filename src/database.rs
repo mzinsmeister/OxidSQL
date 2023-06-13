@@ -5,32 +5,32 @@
 
 use std::{sync::Arc, path::PathBuf};
 
-use crate::{catalog::{Catalog, AttributeDesc, TableDesc}, storage::{buffer_manager::HashTableBufferManager, clock_replacer::ClockReplacer, disk::DiskManager}, planner::{bottomup::BottomUpPlanner, Planner}, execution::engine::{volcano_style, ExecutionEngine}, analyzer::Analyzer, parser, types::{TupleValueType, TupleValue}, access::{SlottedPageSegment, tuple::Tuple}};
+use crate::{catalog::{Catalog, AttributeDesc, TableDesc}, storage::{buffer_manager::{HashTableBufferManager, BufferManagerError}, clock_replacer::ClockReplacer, disk::DiskManager}, planner::{bottomup::BottomUpPlanner, Planner}, execution::engine::{volcano_style, ExecutionEngine}, analyzer::Analyzer, parser, types::{TupleValueType, TupleValue}, access::{SlottedPageSegment, tuple::Tuple, StatisticsCollectingSPHeapStorage, HeapStorage}, config::DbConfig};
 
 type BufferManagerType = Arc<HashTableBufferManager<ClockReplacer, DiskManager>>;
 pub struct OxidSQLDatabase {
     catalog: Catalog<BufferManagerType>,
     buffer_manager: BufferManagerType,
-    planner: BottomUpPlanner,
-    executor: volcano_style::Engine,
+    planner: BottomUpPlanner<BufferManagerType>,
+    executor: volcano_style::Engine<BufferManagerType>,
     analyzer: Analyzer<BufferManagerType>
 }
 
 impl OxidSQLDatabase {
-    pub fn new(data_path: PathBuf, buffer_size: usize) -> OxidSQLDatabase {
+    pub fn new(data_path: PathBuf, buffer_size: usize) -> Result<OxidSQLDatabase, BufferManagerError> {
         let disk_manager = DiskManager::new(data_path);
         let buffer_manager = HashTableBufferManager::new(disk_manager, ClockReplacer::new(), buffer_size);
-        let catalog = Catalog::new(buffer_manager.clone());
+        let catalog = Catalog::new(buffer_manager.clone(), Arc::new(DbConfig::new()))?;
         let analyzer = Analyzer::new(catalog.clone());
-        let planner = BottomUpPlanner::new();
-        let executor = volcano_style::Engine::new();
-        OxidSQLDatabase {
+        let planner = BottomUpPlanner::new(buffer_manager.clone(), catalog.clone());
+        let executor = volcano_style::Engine::new(catalog.clone());
+        Ok(OxidSQLDatabase {
             catalog,
             buffer_manager,
             planner,
             executor,
             analyzer
-        }
+        })
     }
 
     pub fn query<'a>(&self, query: &'a str) -> Result<(), Box<dyn std::error::Error + 'a>> {
@@ -39,81 +39,21 @@ impl OxidSQLDatabase {
             return Err(format!("Query was not parsed fully. Trailing suffix: '{}'", rest_query).into());
         }
         let analyzed_query = self.analyzer.analyze(parse_tree)?;
-        let plan = self.planner.plan(&analyzed_query)?;
+        let plan = self.planner.plan(analyzed_query)?;
         self.executor.execute(plan, self.buffer_manager.clone())?;
         Ok(())
     }
 
     pub fn demo_init(&self) {
-        self.catalog.create_table(TableDesc {
-            id: 1,
-            segment_id: 1024,
-            fsi_segment_id: 1025,
-            sample_segment_id: 1026,
-            name: "people".to_string(),
-            cardinality: 3,
-            attributes: vec![
-                AttributeDesc {
-                    id: 1,
-                    name: "id".to_string(),
-                    data_type: TupleValueType::Int,
-                    nullable: false,
-                    table_ref: 1
-                },
-                AttributeDesc {
-                    id: 2,
-                    name: "name".to_string(),
-                    data_type: TupleValueType::VarChar(255),
-                    nullable: false,
-                    table_ref: 1
-                },
-                AttributeDesc {
-                    id: 3,
-                    name: "age".to_string(),
-                    data_type: TupleValueType::Int,
-                    nullable: true,
-                    table_ref: 1
-                }
-            ]
-        });
-        self.catalog.create_table(TableDesc {
-            id: 2,
-            segment_id: 1027,
-            fsi_segment_id: 1028,
-            sample_segment_id: 1029,
-            name: "cars".to_string(),
-            cardinality: 2,
-            attributes: vec![
-                AttributeDesc {
-                    id: 4,
-                    name: "id".to_string(),
-                    data_type: TupleValueType::Int,
-                    nullable: false,
-                    table_ref: 2
-                },
-                AttributeDesc {
-                    id: 5,
-                    name: "model".to_string(),
-                    data_type: TupleValueType::VarChar(255),
-                    nullable: false,
-                    table_ref: 2
-                },
-                AttributeDesc {
-                    id: 6,
-                    name: "owner_id".to_string(),
-                    data_type: TupleValueType::Int,
-                    nullable: false,
-                    table_ref: 2
-                },
-            ]
-        });
+        self.query("CREATE TABLE people (id INT, name VARCHAR(255), age INT)").unwrap();
+        self.query("CREATE TABLE cars (id INT, model VARCHAR(255), owner_id INT)").unwrap();
         // Init demo data
         let people = self.catalog.find_table_by_name("people").unwrap().unwrap();
         let cars = self.catalog.find_table_by_name("cars").unwrap().unwrap();
-        let people_segment = SlottedPageSegment::new(self.buffer_manager.clone(), people.segment_id, people.segment_id + 1);
-        let cars_segment = SlottedPageSegment::new(self.buffer_manager.clone(), cars.segment_id, cars.segment_id + 1);
+        let people_heap = StatisticsCollectingSPHeapStorage::new(&people, self.buffer_manager.clone(), self.catalog.clone(), 1024).unwrap();
+        let cars_heap = StatisticsCollectingSPHeapStorage::new(&cars, self.buffer_manager.clone(), self.catalog.clone(), 1024).unwrap();
 
-        let people_tuples = vec![
+        let mut people_tuples = vec![
             Tuple::new(vec![
                 Some(TupleValue::Int(1)),
                 Some(TupleValue::String("Elon".to_string())),
@@ -130,7 +70,7 @@ impl OxidSQLDatabase {
                 None
             ])
         ];
-        let cars_tuples = vec![
+        let mut cars_tuples = vec![
             Tuple::new(vec![
                 Some(TupleValue::Int(1)),
                 Some(TupleValue::String("Tesla Model 3".to_string())),
@@ -143,13 +83,9 @@ impl OxidSQLDatabase {
             ])
         ];
 
-        for tuple in people_tuples {
-            people_segment.insert_record(&tuple.get_binary()).unwrap();
-        }
+        people_heap.insert_tuples(&mut people_tuples).unwrap();
 
-        for tuple in cars_tuples {
-            cars_segment.insert_record(&tuple.get_binary()).unwrap();
-        }
+        cars_heap.insert_tuples(&mut cars_tuples).unwrap();
 
         self.buffer_manager.flush().unwrap();
     }

@@ -215,11 +215,11 @@ impl<B: BufferManager> SlottedPageSegment<B> {
         self.allocate_and_do(data.len(), |page, _, offset, length| {
             page.get_record_mut(offset, length).copy_from_slice(data);
             Ok(())
-        }, |page_id| true, None)
+        }, |_| true, None)
     }
 
     pub fn allocate(&self, size: u16) -> Result<RelationTID, B::BError> {
-        self.allocate_and_do(size as usize, |_, _, _ , _| {Ok(())}, |page_id| true, None)
+        self.allocate_and_do(size as usize, |_, _, _ , _| {Ok(())}, |_| true, None)
     }
 
     fn resize_and_do_redirect<F: Fn(&mut [u8]), P: DerefMut<Target=Page>>(&self, tid: RelationTID, redirect_tid: RelationTID, slotted_root_page: &mut SlottedPage<P>, 
@@ -513,7 +513,9 @@ impl<A: Deref<Target = Page>> SlottedPage<A> {
     }
 
     fn get_fragmented_free_space(&self) -> usize {
-        self.get_data_start() as usize - HEADER_SIZE - 8 * self.get_slot_count() as usize
+        let data_start = self.get_data_start() as usize;
+        let slot_count = self.get_slot_count() as usize;
+        data_start as usize - HEADER_SIZE - 8 * slot_count
     }
 
     fn get_data(&self) -> &[u8] {

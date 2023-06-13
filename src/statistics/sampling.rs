@@ -33,7 +33,8 @@ use std::io::{Cursor, Write};
     the w value that produced the skip. We will eventually just write changes of skips 
     (length of skip with index x changed from a to b) to the write ahead log and then apply them back 
     to the list of skips on recovery. That seems to be the simplest way to keep it consistent. This will then
-    also be played back on R1 recovery to set the skips back.
+    also be played back on R1 recovery to set the skips back. It could however turn out to be best/simplest to draw
+    a new sample through a single scan of the table on R2 recovery.
 */
 use std::sync::atomic::{AtomicU64, AtomicU32, AtomicUsize};
 use std::sync::atomic::Ordering::Relaxed;
@@ -42,7 +43,6 @@ use atomic::Ordering;
 use byteorder::{ReadBytesExt, BigEndian, WriteBytesExt};
 use parking_lot::{RwLock, RwLockReadGuard, Mutex};
 
-// Quick and Hacky Atomic f32, u32 tuple
 // Quick and Hacky Atomic f32, u32 tuple
 pub struct AtomicU32F32Tup {
     storage: AtomicU64,
@@ -125,6 +125,7 @@ impl AtomicF32 {
     }
 }
 
+#[derive(Debug)]
 struct Skip {
     index: AtomicU32,
     // w: AtomicF32, We might need this one but we currently don't really
@@ -132,6 +133,7 @@ struct Skip {
     next: AtomicU32, // u32::MAX means end of list
 }
 
+#[derive(Debug)]
 struct ListOfSkips<R: Fn() -> f32> {
     index_and_w_next: AtomicU32F32Tup,
     // we will access this concurrently so it must be fixed size at runtime
@@ -154,7 +156,7 @@ struct ListOfSkips<R: Fn() -> f32> {
 pub struct SkipGuard<'a, R: Fn() -> f32 + Clone> {
     skip_count: u64,
     proccessed: i64, // can also be negative meaning we add length to the skip
-    skip_index: u32,
+    pub skip_index: u32,
     list_index: u32,
     skip: &'a Skip,
     sampler: &'a ReservoirSampler<R>,
@@ -490,6 +492,7 @@ impl<'a, R: Fn() -> f32 + Clone> ListOfSkips<R> {
     }
 }
 
+#[derive(Debug)]
 pub struct ReservoirSampler<R: Fn() -> f32 + Clone = fn() -> f32> {
     random: R,
     list_of_skips: ListOfSkips<R>,
@@ -503,7 +506,11 @@ pub struct ReservoirSampler<R: Fn() -> f32 + Clone = fn() -> f32> {
 
 impl ReservoirSampler<fn() -> f32> {
     pub fn new(sample_size: u32, n_threads: u32) -> ReservoirSampler<fn() -> f32> {
-        ReservoirSampler::with_random(sample_size, n_threads, || rand::random())
+        ReservoirSampler::with_random(sample_size, n_threads, rand::random)
+    }
+
+    pub fn parse(raw: &[u8], n_threads: u32) -> ReservoirSampler<fn() -> f32> {
+        ReservoirSampler::parse_with_random(raw, n_threads, rand::random)
     }
 }
 
@@ -519,7 +526,7 @@ impl<'a, R: Fn() -> f32 + Clone> ReservoirSampler<R> {
         }
     }
 
-    pub fn parse_with_random(raw: &[u8], n_threads: u32, random: R) -> ReservoirSampler<R> {
+    fn parse_with_random(raw: &[u8], n_threads: u32, random: R) -> ReservoirSampler<R> {
         let mut raw_cursor = Cursor::new(raw);
         let sample_size = raw_cursor.read_u32::<BigEndian>().unwrap();
         let los = ListOfSkips::from_bytes(&raw[4..], n_threads, sample_size, random.clone());  
@@ -559,7 +566,7 @@ impl<'a, R: Fn() -> f32 + Clone> ReservoirSampler<R> {
         skip.proccessed = -(n as i64);
     }
 
-    fn snapshot(&self) -> Vec<u8> {
+    pub fn snapshot(&self) -> Vec<u8> {
         let _snapshot_latch = self.snapshot_latch.write();
         let mut bytes = Vec::new();
         let mut cursor = Cursor::new(&mut bytes);
@@ -584,7 +591,6 @@ impl<'a, R: Fn() -> f32 + Clone> ReservoirSampler<R> {
 mod test {
     use std::{cell::RefCell, sync::Arc, collections::{VecDeque, BTreeSet}};
 
-    use bitvec::store::BitStore;
     use parking_lot::Mutex;
     use rand::{thread_rng, Rng, SeedableRng, rngs::StdRng};
 

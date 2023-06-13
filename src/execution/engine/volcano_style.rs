@@ -1,6 +1,6 @@
 use std::{cell::RefCell, rc::Rc, collections::HashMap, error::Error};
 
-use crate::{catalog::TableDesc, access::{SlottedPageScan, SlottedPageSegment, tuple::Tuple}, types::{TupleValueType, TupleValue}, execution::plan::{self, PhysicalQueryPlanOperator, PhysicalQueryPlan, TupleWriter}, storage::buffer_manager::BufferManager};
+use crate::{catalog::{TableDesc, SAMPLE_SIZE, Catalog}, access::{SlottedPageScan, SlottedPageSegment, tuple::Tuple, StatisticsCollectingSPHeapStorage, HeapStorage}, types::{TupleValueType, TupleValue}, execution::plan::{self, PhysicalQueryPlanOperator, PhysicalQueryPlan, TupleWriter}, storage::buffer_manager::BufferManager};
 
 use super::{ExecutionEngine};
 
@@ -268,77 +268,187 @@ impl Operator for Print {
     }
 }
 
+struct InlineTable {
+    tuples: Vec<Tuple>,
+    output_registers: Vec<Register>,
+    next_tuple: usize
+}
 
-pub struct Engine;
+impl InlineTable {
+    fn new(tuples: Vec<Tuple>) -> Self {
+        let mut output_registers = Vec::with_capacity(tuples[0].values.len());
+        for _ in 0..tuples[0].values.len() {
+            output_registers.push(Register::new(RefCell::new(None)));
+        }
+        InlineTable {
+            tuples,
+            output_registers,
+            next_tuple: 0
+        }
+    }
+}
 
-impl Engine {
-    pub fn new() -> Self {
-        Engine
+impl Operator for InlineTable {
+    fn next(&mut self) -> Result<bool, Box<dyn Error>> {
+        if self.next_tuple < self.tuples.len() {
+            for i in 0..self.tuples[self.next_tuple].values.len() {
+                self.output_registers[i].replace(self.tuples[self.next_tuple].values[i].to_owned());
+            }
+            self.next_tuple += 1;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
-    fn convert_predicate_to_volcano_style(op: plan::BooleanExpression, input_registers: &[Register]) -> BooleanExpression {
+    fn get_output(&self) -> &[Register] {
+        &self.output_registers
+    }
+}
+
+struct Insert<B: BufferManager> {
+    child: Box<dyn Operator>,
+    storage: StatisticsCollectingSPHeapStorage<B>
+}
+
+impl<B: BufferManager> Insert<B> {
+    fn new(child: Box<dyn Operator>, storage: StatisticsCollectingSPHeapStorage<B>) -> Self {
+        Insert {
+            child,
+            storage
+        }
+    }
+}
+
+impl<B: BufferManager> Operator for Insert<B> {
+    fn next(&mut self) -> Result<bool, Box<dyn Error>> {
+        if self.child.next()? {
+            let mut tuple = Tuple::new(Vec::with_capacity(self.child.get_output().len()));
+            for register in self.child.get_output() {
+                tuple.values.push(register.borrow().to_owned());
+            }
+            self.storage.insert_tuples(&mut [tuple])?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn get_output(&self) -> &[Register] {
+        self.child.get_output()
+    }
+}
+
+pub struct CreateTable<B: BufferManager> {
+    catalog: Catalog<B>,
+    table: TableDesc
+}
+
+impl<B: BufferManager> CreateTable<B> {
+    pub fn new(catalog: Catalog<B>, table: TableDesc) -> Self {
+        CreateTable {
+            catalog,
+            table
+        }
+    }
+}
+
+impl<B: BufferManager> Operator for CreateTable<B> {
+    fn next(&mut self) -> Result<bool, Box<dyn Error>> {
+        self.catalog.create_table(&self.table)?;
+        Ok(false)
+    }
+
+    fn get_output(&self) -> &[Register] {
+        &[]
+    }
+}
+
+pub struct Engine<B: BufferManager> {
+    catalog: Catalog<B>
+}
+
+impl<B: BufferManager> Engine<B> {
+    pub fn new(catalog: Catalog<B>) -> Self {
+        Engine {
+            catalog: catalog
+        }
+    }
+
+    fn convert_predicate_to_volcano_style(&self, op: plan::BooleanExpression, input_registers: &[Register]) -> BooleanExpression {
         match op {
             plan::BooleanExpression::And(left, right) => {
-                let left_conv = Engine::convert_predicate_to_volcano_style(*left, input_registers);
-                let right_conv = Engine::convert_predicate_to_volcano_style(*right, input_registers);
+                let left_conv = self.convert_predicate_to_volcano_style(*left, input_registers);
+                let right_conv = self.convert_predicate_to_volcano_style(*right, input_registers);
                 BooleanExpression::And(Box::new(left_conv), Box::new(right_conv))
             },
             plan::BooleanExpression::Eq(left, right) => {
-                let left_conv = Engine::convert_arith_expression_to_volcano_style(left, input_registers);
-                let right_conv = Engine::convert_arith_expression_to_volcano_style(right, input_registers);
+                let left_conv = self.convert_arith_expression_to_volcano_style(left, input_registers);
+                let right_conv = self.convert_arith_expression_to_volcano_style(right, input_registers);
                 BooleanExpression::Eq(left_conv, right_conv)
             },
             plan::BooleanExpression::LessThan(left, right) => {
-                let left_conv = Engine::convert_arith_expression_to_volcano_style(left, input_registers);
-                let right_conv = Engine::convert_arith_expression_to_volcano_style(right, input_registers);
+                let left_conv = self.convert_arith_expression_to_volcano_style(left, input_registers);
+                let right_conv = self.convert_arith_expression_to_volcano_style(right, input_registers);
                 BooleanExpression::LessThan(left_conv, right_conv)
             },
             plan::BooleanExpression::LessThanOrEq(left, right) => {
-                let left_conv = Engine::convert_arith_expression_to_volcano_style(left, input_registers);
-                let right_conv = Engine::convert_arith_expression_to_volcano_style(right, input_registers);
+                let left_conv = self.convert_arith_expression_to_volcano_style(left, input_registers);
+                let right_conv = self.convert_arith_expression_to_volcano_style(right, input_registers);
                 BooleanExpression::LessThanOrEq(left_conv, right_conv)
             },
         }
     }
 
-    fn convert_arith_expression_to_volcano_style(expression: plan::ArithmeticExpression, input_registers: &[Register]) -> ArithmeticExpression {
+    fn convert_arith_expression_to_volcano_style(&self, expression: plan::ArithmeticExpression, input_registers: &[Register]) -> ArithmeticExpression {
         match expression {
             plan::ArithmeticExpression::Column(c) => ArithmeticExpression::Value(input_registers[c].clone()),
             plan::ArithmeticExpression::Literal(value) => ArithmeticExpression::Value(Rc::new(RefCell::new(Some(value)))),
         }
     }
 
-    fn convert_physical_plan_to_volcano_plan<B: BufferManager + 'static>(buffer_manager: B, operator: PhysicalQueryPlanOperator) -> Box<dyn Operator> {
-        match operator {
+    fn convert_physical_plan_to_volcano_plan(&self, buffer_manager: B, operator: PhysicalQueryPlanOperator) -> Result<Box<dyn Operator>, B::BError> {
+        Ok(match operator {
             PhysicalQueryPlanOperator::Tablescan { table } => {
                 let segment = SlottedPageSegment::new(buffer_manager, table.segment_id, table.segment_id + 1);
                 Box::new(new_scan(segment, table))
             },
             PhysicalQueryPlanOperator::Print { input, tuple_writer } => {
-                let child = Self::convert_physical_plan_to_volcano_plan(buffer_manager, *input);
+                let child = self.convert_physical_plan_to_volcano_plan(buffer_manager, *input)?;
                 Box::new(Print::new(child, tuple_writer))
             },
             PhysicalQueryPlanOperator::Selection { predicate, input } => {
-                let child = Self::convert_physical_plan_to_volcano_plan(buffer_manager, *input);
-                let predicate = Self::convert_predicate_to_volcano_style(predicate, child.get_output());
+                let child = self.convert_physical_plan_to_volcano_plan(buffer_manager, *input)?;
+                let predicate = self.convert_predicate_to_volcano_style(predicate, child.get_output());
                 Box::new(Selection::new(child, predicate))
             },
             PhysicalQueryPlanOperator::HashJoin { left, right, on } => {
-                let left = Self::convert_physical_plan_to_volcano_plan(buffer_manager.clone(), *left);
-                let right = Self::convert_physical_plan_to_volcano_plan(buffer_manager, *right);
+                let left = self.convert_physical_plan_to_volcano_plan(buffer_manager.clone(), *left)?;
+                let right = self.convert_physical_plan_to_volcano_plan(buffer_manager, *right)?;
                 Box::new(HashJoin::new(left, right, on))
             },
             PhysicalQueryPlanOperator::Projection { projection_ius, input } => {
-                let child = Self::convert_physical_plan_to_volcano_plan(buffer_manager, *input);
+                let child = self.convert_physical_plan_to_volcano_plan(buffer_manager, *input)?;
                 Box::new(Projection::new(child, projection_ius))
-            }
-        }
+            },
+            PhysicalQueryPlanOperator::InlineTable { tuples } => {
+                Box::new(InlineTable::new(tuples))
+            },
+            PhysicalQueryPlanOperator::Insert { input, table } => {
+                let child = self.convert_physical_plan_to_volcano_plan(buffer_manager.clone(), *input)?;
+                let storage = StatisticsCollectingSPHeapStorage::new(&table, buffer_manager, self.catalog.clone(), SAMPLE_SIZE as usize)?;
+                Box::new(Insert::new(child, storage))
+            },
+            PhysicalQueryPlanOperator::CreateTable { table } => {
+                Box::new(CreateTable::new(self.catalog.clone(), table))
+            },
+        })
     }
 }
 
-impl<B: BufferManager> ExecutionEngine<B> for Engine {
+impl<B: BufferManager> ExecutionEngine<B> for Engine<B> {
     fn execute(&self, plan: PhysicalQueryPlan, buffer_manager: B) -> Result<(), Box<dyn Error>> {
-        let mut volcano_plan = Self::convert_physical_plan_to_volcano_plan(buffer_manager, plan.root_operator);
+        let mut volcano_plan = self.convert_physical_plan_to_volcano_plan(buffer_manager, plan.root_operator)?;
         while volcano_plan.next()? {
             // Do nothing
         }
@@ -349,8 +459,6 @@ impl<B: BufferManager> ExecutionEngine<B> for Engine {
 #[cfg(test)]
 mod mock {
     use std::collections::VecDeque;
-
-    use crate::storage::buffer_manager::mock::MockBufferManager;
 
     use super::*;
 
@@ -389,9 +497,9 @@ mod mock {
 
 #[cfg(test)]
 mod test {
-    use std::{rc::Rc, cell::RefCell};
+    use std::{rc::Rc, cell::RefCell, sync::Arc};
 
-    use crate::{storage::{page::PAGE_SIZE, buffer_manager::mock::MockBufferManager}, access::{SlottedPageSegment, tuple::Tuple}, types::{TupleValue, TupleValueType}, execution::{plan::{PhysicalQueryPlan, PhysicalQueryPlanOperator, mock::MockTupleWriter}, engine::volcano_style::{Selection, ArithmeticExpression, Print}}, catalog::{AttributeDesc, TableDesc}};
+    use crate::{storage::{page::PAGE_SIZE, buffer_manager::mock::MockBufferManager}, access::{SlottedPageSegment, tuple::Tuple}, types::{TupleValue, TupleValueType}, execution::{plan::{PhysicalQueryPlan, PhysicalQueryPlanOperator, mock::MockTupleWriter}, engine::volcano_style::{Selection, ArithmeticExpression, Print}}, catalog::{AttributeDesc, TableDesc, Catalog}, config::DbConfig};
 
     use super::{super::ExecutionEngine, Operator, mock::MockVolcanoSourceOperator, new_scan}; 
 
@@ -415,10 +523,10 @@ mod test {
                     table_ref: 0
                 }
             ],
-            segment_id: 0,
-            fsi_segment_id: 1,
-            sample_segment_id: 2,
-            cardinality: 2,
+            segment_id: 1000,
+            fsi_segment_id: 1001,
+            sample_segment_id: 1002,
+            sample_fsi_segment_id: 1003,
         }
     }
 
@@ -588,7 +696,7 @@ mod test {
     #[test]
     fn test_tablescan_print() {
         let buffer_manager = MockBufferManager::new(PAGE_SIZE);
-        let sp_segment = SlottedPageSegment::new(buffer_manager.clone(), 0, 1);
+        let sp_segment = SlottedPageSegment::new(buffer_manager.clone(), 1000, 1001);
         let tuples = vec![
             Tuple::new(vec![Some(TupleValue::Int(1)), Some(TupleValue::String("a".to_string()))]),
             Tuple::new(vec![Some(TupleValue::Int(2)), Some(TupleValue::String("b".to_string()))]),
@@ -598,7 +706,7 @@ mod test {
             sp_segment.insert_record(&tuple.get_binary()).unwrap();
         }
         let lines: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
-        let lines2 = lines.clone();
+        let _lines2 = lines.clone();
         let tuple_writer = MockTupleWriter::new();
         let root_operator = PhysicalQueryPlan::new(
             PhysicalQueryPlanOperator::Print {
@@ -611,7 +719,9 @@ mod test {
             },
             200.0
         );
-        let engine = super::Engine::new();
+        // Catalog is not used here, so we can just create a dummy one
+        let catalog = Catalog::new(buffer_manager.clone(), Arc::new(DbConfig { n_threads: 4 })).unwrap();
+        let engine = super::Engine::new(catalog);
         engine.execute(root_operator, buffer_manager).unwrap();
         assert_eq!(tuple_writer.tuples.borrow().clone(), tuples);
     }

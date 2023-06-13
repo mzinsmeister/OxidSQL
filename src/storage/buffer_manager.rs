@@ -225,6 +225,18 @@ impl<R: Replacer + Send, S: StorageManager> HashTableBufferManager<R, S> {
             if self.disk_manager.get_relation_size(page_id.segment_id) / PAGE_SIZE as u64 > page_id.offset_id {
                 self.disk_manager.read_page(page_id, &mut new_page_write.data)?;
             }
+            // HACK: duplicated code
+            if self.disk_manager.get_relation_size(page_id.segment_id) / PAGE_SIZE as u64 > page_id.offset_id {
+                self.disk_manager.read_page(page_id, &mut new_page_write.data)?;
+                new_page_write.state = PageState::CLEAN;
+            } else {
+                new_page_write.state = PageState::NEW;
+                let mut segment_sizes = self.segment_sizes.write();
+                if !segment_sizes.contains_key(&page_id.segment_id) {
+                    segment_sizes.insert(page_id.segment_id, self.disk_manager.get_relation_size(page_id.segment_id) as usize / PAGE_SIZE);
+                }
+                *(segment_sizes.get_mut(&page_id.segment_id).unwrap()) += 1;
+            }
             drop(new_page_write);
             return Ok(new_page);     
         } else {

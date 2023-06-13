@@ -1,8 +1,8 @@
-use std::{fmt::{Display, Debug}, collections::BTreeMap, error::Error};
+use std::{fmt::{Display, Debug}, error::Error};
 
-use itertools::{Itertools, join};
+use itertools::{Itertools};
 
-use crate::{storage::buffer_manager::BufferManager, catalog::Catalog, planner::{Query, BoundTable, BoundAttribute, Selection, SelectionOperator}, parser::{ParseTree, SelectParseTree, ParseWhereClause, ParseWhereClauseItem, BoundParseAttribute}, execution::plan, types::TupleValue};
+use crate::{storage::buffer_manager::BufferManager, catalog::{Catalog, TableDesc, AttributeDesc}, planner::{Query, BoundTable, BoundAttribute, Selection, SelectionOperator, SelectQuery, InsertQuery, CreateTableQuery}, parser::{ParseTree, SelectParseTree, ParseWhereClause, ParseWhereClauseItem, BoundParseAttribute, InsertParseTree, CreateTableParseTree, TableDefinitionItem}, types::{TupleValueConversionError}, access::tuple::Tuple};
 
 #[derive(Debug)]
 pub enum AnalyzerError<B: BufferManager> {
@@ -13,6 +13,9 @@ pub enum AnalyzerError<B: BufferManager> {
     UnboundBinding(String),
     AmbiguousAttributeName(String),
     UncomparableDataTypes(String),
+    MissingValues(Vec<String>),
+    TooManyValues{ expected: usize, actual: usize },
+    DataTypeNotConvertible(usize, TupleValueConversionError),
 }
 
 impl<B: BufferManager> Display for AnalyzerError<B> {
@@ -37,7 +40,9 @@ impl<B: BufferManager> Analyzer<B> {
     pub fn analyze(&self, parse_tree: ParseTree) -> Result<Query, AnalyzerError<B>> {
         match parse_tree {
             ParseTree::Select(select_tree) => self.analyze_select(select_tree),
-            _ => Err(AnalyzerError::UnimplementedError("Only SELECT is supported at the moment".to_string()))
+            ParseTree::Insert(insert_tree) => self.analyze_insert(insert_tree),
+            ParseTree::CreateTable(create_table_tree) => self.analyze_create_table(create_table_tree),
+            _ => Err(AnalyzerError::UnimplementedError("Only SELECT, Insert and Create Table is supported at the moment".to_string()))
         }
     }
 
@@ -81,12 +86,12 @@ impl<B: BufferManager> Analyzer<B> {
         //let (selections, join_predicates) = select_tree.where_clause.map_or((vec![], vec![]),|w| Self::analyze_where(&w)?);
 
 
-        return Ok(Query {
+        return Ok(Query::Select(SelectQuery {
             select,
             from,
             join_predicates,
             selections
-        })
+        }))
     }
 
     // The signature of that function is just temporary since as long as we only allow equals predicates
@@ -147,7 +152,7 @@ impl<B: BufferManager> Analyzer<B> {
              => {
                 let (l, r) = match l {
                     ParseWhereClauseItem::Name(n1) => match r {
-                        ParseWhereClauseItem::Name(n2) => return Err(AnalyzerError::UnimplementedError("Non-equijoins unimplemented".to_string())),
+                        ParseWhereClauseItem::Name(_) => return Err(AnalyzerError::UnimplementedError("Non-equijoins unimplemented".to_string())),
                         ParseWhereClauseItem::Value(v) => {
                             (n1, v)
                         },
@@ -172,7 +177,10 @@ impl<B: BufferManager> Analyzer<B> {
                 };
                 selections.push(selection)
             },
-            ParseWhereClause::And(l, r) => todo!(),
+            ParseWhereClause::And(l, r) => {
+                Self::analyze_where_rec(l, selections, join_predicates, from_tables)?;
+                Self::analyze_where_rec(r, selections, join_predicates, from_tables)?;
+            }
             ParseWhereClause::Or(_, _) => return Err(AnalyzerError::UnimplementedError("Or unimplemented".to_string())),
         }
         Ok(())
@@ -201,6 +209,64 @@ impl<B: BufferManager> Analyzer<B> {
         Ok(BoundAttribute { attribute: attribute.clone(), binding: binding })
     }
 
+    fn analyze_insert(&self, insert_tree: InsertParseTree) -> Result<Query, AnalyzerError<B>> {
+        let table = match self.catalog.find_table_by_name(&insert_tree.table) {
+            Ok(Some(table)) => table,
+            Ok(None) => return Err(AnalyzerError::RelationNotFoundError(insert_tree.table.to_string())),
+            Err(e) => return Err(AnalyzerError::BufferManagerError(e))
+        };
+        if insert_tree.values.len() < table.attributes.len() {
+            return Err(AnalyzerError::MissingValues(table.attributes.iter().skip(insert_tree.values.len()).map(|a| a.name.to_string()).collect()));
+        }
+        if insert_tree.values.len() > table.attributes.len() {
+            return Err(AnalyzerError::TooManyValues{ expected: table.attributes.len(), actual: insert_tree.values.len() });
+        }
+        let mut tuple = Tuple::new(Vec::with_capacity(table.attributes.len()));
+        for (i, attribute) in table.attributes.iter().enumerate() {
+            let typed_value = match insert_tree.values[i].as_ref().map(|v| v.try_convert_to(attribute.data_type)) {
+                Some(Ok(v)) => Some(v),
+                None => None,
+                Some(Err(e)) => return Err(AnalyzerError::DataTypeNotConvertible(i, e))
+            };
+            tuple.values.push(typed_value);                
+        }
+        Ok(Query::Insert(InsertQuery {
+            table: table,
+            values: vec![tuple]
+        }))
+
+    }
+
+    fn analyze_create_table(&self, create_table_tree: CreateTableParseTree) -> Result<Query, AnalyzerError<B>> {
+        let mut attributes = Vec::with_capacity(create_table_tree.table_definition.len());
+        for attribute_definition in create_table_tree.table_definition.iter() {
+            if let TableDefinitionItem::ColumnDefinition { definition, .. } = attribute_definition {
+                attributes.push((definition.name.to_string(), definition.column_type));
+            }
+        }
+        let attribute_start_id = self.catalog.allocate_attribute_ids(attributes.len() as u32);
+        let segment_id = self.catalog.allocate_segment_ids(4);
+        let table_id = self.catalog.allocate_db_object_id();
+        let table = TableDesc {
+            id: table_id,
+            name: create_table_tree.name.to_string(),
+            segment_id,
+            fsi_segment_id: segment_id + 1,
+            sample_segment_id: segment_id + 2,
+            sample_fsi_segment_id: segment_id + 3,
+            attributes: attributes.into_iter().enumerate().map(|(i, (name, data_type))| AttributeDesc {
+                id: attribute_start_id + i as u32,
+                name,
+                data_type,
+                nullable: true,
+                table_ref: table_id
+            }).collect()
+        };
+        Ok(Query::CreateTable(CreateTableQuery {
+            table
+        }))
+    }
+
 }
 
 #[cfg(test)]
@@ -208,18 +274,19 @@ mod test {
 
     use std::sync::Arc;
 
-    use crate::{storage::{buffer_manager::mock::MockBufferManager, page::PAGE_SIZE}, catalog::{TableDesc, AttributeDesc}, types::TupleValueType, parser::BoundParseTable, planner::BoundTableRef};
+    use crate::{storage::{buffer_manager::mock::MockBufferManager, page::PAGE_SIZE}, catalog::{TableDesc, AttributeDesc}, types::{TupleValueType, TupleValue}, parser::BoundParseTable, planner::BoundTableRef, config::DbConfig};
 
     use super::*;
 
     fn get_catalog(bm: Arc<MockBufferManager>) -> Catalog<Arc<MockBufferManager>> {
-        let catalog = Catalog::new(bm);
-        catalog.create_table(TableDesc{
+        let catalog = Catalog::new(bm, Arc::new(DbConfig { n_threads: 4 })).unwrap();
+        catalog.create_table(&TableDesc{
                 id: 1, 
                 name: "people".to_string(), 
                 segment_id: 1024,
                 fsi_segment_id: 1025,
                 sample_segment_id: 1026,
+                sample_fsi_segment_id: 1027,
                 attributes: vec![
                     AttributeDesc{
                         id: 1,
@@ -243,8 +310,7 @@ mod test {
                         table_ref: 1
                     }
                 ],
-                cardinality: 0, // Irrelevant for analyzer tests
-            });
+            }).unwrap();
             catalog
     }
 
@@ -268,16 +334,111 @@ mod test {
             where_clause: None
         });
         let query = analyzer.analyze(parse_tree).unwrap();
-        assert_eq!(query.select.len(), 1);
-        assert_eq!(query.select[0].attribute.name, "id");
-        assert_eq!(query.select[0].attribute.id, 1);
-        assert_eq!(query.select[0].attribute.table_ref, 1);
-        assert_eq!(query.select[0].binding, None);
-        assert_eq!(query.from.len(), 1);
-        assert_eq!(query.from[&BoundTableRef { table_ref: 1, binding: None }].table.id, 1);
-        assert_eq!(query.from[&BoundTableRef { table_ref: 1, binding: None }].table.name, "people");
-        assert_eq!(query.from[&BoundTableRef { table_ref: 1, binding: None }].binding, None);
-        assert_eq!(query.join_predicates.len(), 0);
-        assert_eq!(query.selections.len(), 0);
+        if let Query::Select(query) = query {
+            assert_eq!(query.select.len(), 1);
+            assert_eq!(query.select[0].attribute.name, "id");
+            assert_eq!(query.select[0].attribute.id, 1);
+            assert_eq!(query.select[0].attribute.table_ref, 1);
+            assert_eq!(query.select[0].binding, None);
+            assert_eq!(query.from.len(), 1);
+            assert_eq!(query.from[&BoundTableRef { table_ref: 1, binding: None }].table.id, 1);
+            assert_eq!(query.from[&BoundTableRef { table_ref: 1, binding: None }].table.name, "people");
+            assert_eq!(query.from[&BoundTableRef { table_ref: 1, binding: None }].binding, None);
+            assert_eq!(query.join_predicates.len(), 0);
+            assert_eq!(query.selections.len(), 0);
+        } else {
+            panic!("Query is not a select query");
+        }
+    }
+
+    #[test]
+    fn test_analyze_insert() {
+        let catalog = get_catalog(MockBufferManager::new(PAGE_SIZE));
+        let analyzer = Analyzer::new(catalog);
+        let parse_tree = ParseTree::Insert(InsertParseTree {
+            table: "people",
+            values: vec![
+                Some(TupleValue::BigInt(1)),
+                Some(TupleValue::String("John".to_string())),
+                Some(TupleValue::BigInt(42))
+            ]
+        });
+        let query = analyzer.analyze(parse_tree).unwrap();
+        if let Query::Insert(query) = query {
+            assert_eq!(query.table.id, 1);
+            assert_eq!(query.table.name, "people");
+            assert_eq!(query.values.len(), 1);
+            assert_eq!(query.values[0].values.len(), 3);
+            assert_eq!(query.values[0].values[0].as_ref().unwrap().as_int(), 1);
+            assert_eq!(query.values[0].values[1].as_ref().unwrap().as_string(), "John");
+            assert_eq!(query.values[0].values[2].as_ref().unwrap().as_small_int(), 42);
+        } else {
+            panic!("Query is not an insert query");
+        }
+    }
+
+    #[test]
+    fn test_analyze_insert_missing_values() {
+        let catalog = get_catalog(MockBufferManager::new(PAGE_SIZE));
+        let analyzer = Analyzer::new(catalog);
+        let parse_tree = ParseTree::Insert(InsertParseTree {
+            table: "people",
+            values: vec![
+                Some(TupleValue::BigInt(1)),
+                Some(TupleValue::String("John".to_string())),
+            ]
+        });
+        let query = analyzer.analyze(parse_tree);
+        assert!(query.is_err());
+        if let Err(AnalyzerError::MissingValues(missing)) = query {
+            assert_eq!(missing.len(), 1);
+            assert_eq!(missing[0], "age");
+        } else {
+            panic!("Query is not an insert query");
+        }
+    }
+
+    #[test]
+    fn test_analyze_insert_too_many_values() {
+        let catalog = get_catalog(MockBufferManager::new(PAGE_SIZE));
+        let analyzer = Analyzer::new(catalog);
+        let parse_tree = ParseTree::Insert(InsertParseTree {
+            table: "people",
+            values: vec![
+                Some(TupleValue::BigInt(1)),
+                Some(TupleValue::String("John".to_string())),
+                Some(TupleValue::BigInt(42)),
+                Some(TupleValue::BigInt(42))
+            ]
+        });
+        let query = analyzer.analyze(parse_tree);
+        assert!(query.is_err());
+        if let Err(AnalyzerError::TooManyValues{ expected, actual }) = query {
+            assert_eq!(expected, 3);
+            assert_eq!(actual, 4);
+        } else {
+            panic!("Query is not an insert query");
+        }
+    }
+
+    #[test]
+    fn test_analyze_insert_wrong_type() {
+        let catalog = get_catalog(MockBufferManager::new(PAGE_SIZE));
+        let analyzer = Analyzer::new(catalog);
+        let parse_tree = ParseTree::Insert(InsertParseTree {
+            table: "people",
+            values: vec![
+                Some(TupleValue::BigInt(1)),
+                Some(TupleValue::BigInt(2)),
+                Some(TupleValue::BigInt(42)),
+            ]
+        });
+        let query = analyzer.analyze(parse_tree);
+        if let Err(AnalyzerError::DataTypeNotConvertible(index, conversion_error)) = query {
+            assert_eq!(index, 1);
+            assert_eq!(conversion_error, TupleValueConversionError::TypeNotConvertible);
+        } else {
+            panic!("Analyzer didn't return the correct error");
+        }
     }
 }

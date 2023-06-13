@@ -27,6 +27,7 @@ fn gen_bool_thread_rng(p: f64) -> bool {
     rand::thread_rng().gen_bool(p)
 }
 
+#[derive(Debug)]
 pub struct CountingHyperLogLog<R: Fn(f64) -> bool = fn(f64) -> bool> {
     buckets: [[AtomicU8; 59]; 64],
     random: R
@@ -43,6 +44,10 @@ impl CountingHyperLogLog<fn(f64) -> bool> {
     pub fn new() -> CountingHyperLogLog<fn(f64) -> bool> {
         CountingHyperLogLog::with_random(gen_bool_thread_rng)
     }
+
+    pub fn from_bytes(bytes: [u8; 59 * 64]) -> CountingHyperLogLog<fn(f64) -> bool> {
+        CountingHyperLogLog::from_bytes_with_random(bytes, gen_bool_thread_rng)
+    }
 }
 
 impl<R: Fn(f64) -> bool> CountingHyperLogLog<R> {
@@ -54,7 +59,7 @@ impl<R: Fn(f64) -> bool> CountingHyperLogLog<R> {
         }
     }
 
-    pub fn from_bytes(bytes: [u8; 59 * 64], random: R) -> CountingHyperLogLog<R> {
+    pub fn from_bytes_with_random(bytes: [u8; 59 * 64], random: R) -> CountingHyperLogLog<R> {
         let buckets: [[AtomicU8; 59]; 64] = [(); 64].map(|_| [(); 59].map(|_| AtomicU8::new(0)));
         for (i, val) in bytes.iter().enumerate() {
             let bucket = &buckets[i / 59];
@@ -155,12 +160,16 @@ impl<R: Fn(f64) -> bool> CountingHyperLogLog<R> {
             -((1u64 << 32) as f64) * (1.0 - estimate / (1u64 << 32) as f64).ln()
         }
     }
+
+    pub fn to_bytes(&self) -> [u8; 59 * 64] {
+        self.into()
+    }
 }
 
 /// Make sure you only call this when you're sure that the CountingHyperLogLog is not being updated
 /// by another thread.
-impl<R: Fn(f64) -> bool> From<CountingHyperLogLog<R>> for [u8; 59 * 64] {
-    fn from(chll: CountingHyperLogLog<R>) -> [u8; 59 * 64] {
+impl<R: Fn(f64) -> bool> From<&CountingHyperLogLog<R>> for [u8; 59 * 64] {
+    fn from(chll: &CountingHyperLogLog<R>) -> [u8; 59 * 64] {
         chll.buckets.iter()
             .flat_map(|b| b.iter())
             .map(|c| c.load(Relaxed))
