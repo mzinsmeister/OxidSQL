@@ -8,7 +8,7 @@ use parking_lot::RwLock;
 
 #[cfg_attr(test, automock)]
 pub trait Replacer: Debug {
-  fn find_victim<'a>(&mut self) -> Option<(PageId)>;
+  fn find_victim<'a>(&mut self) -> Option<PageId>;
   fn use_page(&mut self, page_id: PageId);
   fn has_page(&self, page_id: PageId) -> bool;
   fn load_page(&mut self, page_id: PageId, page: PageType);

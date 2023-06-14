@@ -1,7 +1,5 @@
 use std::fmt::Display;
 
-use petgraph::data;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RelationTID {
     pub page_id: u64, // only current segment (48 bits max)
