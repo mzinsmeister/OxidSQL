@@ -404,7 +404,8 @@ impl ScanFunction<Tuple> for TupleParser {
 impl<'a, V: BorrowMut<Option<TupleValue>> + 'a> ScanFunction<()> for MutatingTupleParser<'a, V> {
     #[inline(always)]
     fn apply(&mut self, val: &[u8]) -> Option<()> {
-        self.apply(val)
+        self.parse(val);
+        Some(())
     }
 }
 
@@ -721,13 +722,13 @@ impl<A: Deref<Target = Page> + DerefMut<Target = Page>> SlottedPage<A> {
     /// Compactify the page by moving all data to the end of the page and removing any free space in between.
     fn compactify(&mut self) {
         struct OffsetLengthSlot {
-            slot_id: u16, offset: u32, length: u32
+            slot_id: u16, length: u32
         }
         let mut offset_slot_map: BTreeMap<usize, OffsetLengthSlot> = BTreeMap::new();
         for slot_id in 0..self.get_slot_count() {
             let slot = self.get_slot(slot_id);
             if let Slot::Slot { offset, length } = slot {
-                offset_slot_map.insert(offset as usize, OffsetLengthSlot { slot_id, offset, length });
+                offset_slot_map.insert(offset as usize, OffsetLengthSlot { slot_id, length });
             }
         }
         let mut new_data_start = self.page.len() as u32;
