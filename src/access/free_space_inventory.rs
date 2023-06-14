@@ -1,4 +1,4 @@
-cuse crate::storage::{buffer_manager::BufferManager, page::{PAGE_SIZE, PageId, Page, OffsetId, SegmentId}};
+use crate::storage::{buffer_manager::BufferManager, page::{PAGE_SIZE, PageId, Page, OffsetId, SegmentId}};
 
 /*
 Free Space Segment:
