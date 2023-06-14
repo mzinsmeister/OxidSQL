@@ -32,6 +32,10 @@ fn main() {
     } else {
         PathBuf::from("./data")
     };
+    // Create the directory if it doesn't exist
+    if !path.exists() {
+        std::fs::create_dir_all(&path).unwrap();
+    }
     // Initialize the database if the path is empty
     let database = OxidSQLDatabase::new(path.clone(), 1024usize).unwrap();
     if path.exists() && path.is_dir() && path.read_dir().unwrap().count() > 0 {
