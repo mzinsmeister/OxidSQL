@@ -32,6 +32,8 @@ const HASHER: ahash::RandomState = ahash::RandomState::with_seeds(5432123, 45653
     A heap storage is a storage that only allows access through a tuple id or a scan.
  */
 pub trait HeapStorage<B: BufferManager> {
+    // Not sure FnMut is actually a good idea here. Makes parallelizing this impossible
+    // but probably it's a better idea to hand out iterators starting and ending at different positions anyway
     type ScanIterator<P: FnMut(&Tuple) -> bool>: Iterator<Item = Result<(RelationTID, Tuple), B::BError>>;
     type MutatingScanIterator<'a, V: BorrowMut<Option<TupleValue>>, P: Fn(&[V]) -> bool>: Iterator<Item = Result<RelationTID, B::BError>> where V: 'a;
 
