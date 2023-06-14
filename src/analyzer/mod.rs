@@ -42,7 +42,6 @@ impl<B: BufferManager> Analyzer<B> {
             ParseTree::Select(select_tree) => self.analyze_select(select_tree),
             ParseTree::Insert(insert_tree) => self.analyze_insert(insert_tree),
             ParseTree::CreateTable(create_table_tree) => self.analyze_create_table(create_table_tree),
-            _ => Err(AnalyzerError::UnimplementedError("Only SELECT, Insert and Create Table is supported at the moment".to_string()))
         }
     }
 

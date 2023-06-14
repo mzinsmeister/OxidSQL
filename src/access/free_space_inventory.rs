@@ -164,6 +164,7 @@ impl<B: BufferManager> FreeSpaceSegment<B> {
         encoded.min(15)
     }
 
+    #[allow(dead_code)]
     fn decode(&self, encoded: u8) -> usize {
         let encoded = encoded as f64;
         let max_size = self.max_useable_space as f64;

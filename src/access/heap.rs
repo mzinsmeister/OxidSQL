@@ -199,7 +199,6 @@ impl CounterRNG {
  */
 pub struct StatisticsCollectingSPHeapStorage<B: BufferManager> {
     storage: SlottedPageHeapStorage<B>,
-    catalog: Catalog<B>,
     // One HyperLogLog for each column. 
     // Write lock is only needed for schema changes.
     attribute_statistics: Vec<AttributeStatistics>,
@@ -223,7 +222,7 @@ impl<B: BufferManager> StatisticsCollectingSPHeapStorage<B> {
         let attribute_statistics = statistics.attribute_statistics.clone();
         let reservoir_sampler = statistics.table_statistics.sampler.clone();
         let cardinality = statistics.table_statistics.cardinality.clone();
-        Ok(Self { storage, catalog, attribute_statistics, reservoir_sampler, sample_storage, sample_size, crng, cardinality })
+        Ok(Self { storage, attribute_statistics, reservoir_sampler, sample_storage, sample_size, crng, cardinality })
     }
 }
 

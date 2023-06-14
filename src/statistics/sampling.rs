@@ -52,6 +52,8 @@ impl AtomicU32F32Tup {
         let as_u32 = value.1.to_bits();
         Self { storage: AtomicU64::new((value.0 as u64) << 32 | as_u32 as u64) }
     }
+
+    #[allow(dead_code)]
     pub fn store(&self, value: (u32, f32), ordering: Ordering) {
         let as_u32 = value.1.to_bits();
         self.storage.store((value.0 as u64) << 32 | as_u32 as u64, ordering)
@@ -94,34 +96,6 @@ impl Debug for AtomicU32F32Tup {
         let right_as_f32 = f32::from_bits(right_as_u32);
         let left_as_u32 = (as_u64 >> 32) as u32;
         write!(f, "({}, {})", left_as_u32, right_as_f32)
-    }
-}
-
-#[derive(Debug)]
-pub struct AtomicF32 {
-    storage: AtomicU32,
-}
-impl AtomicF32 {
-    pub fn new(value: f32) -> Self {
-        let as_u32 = value.to_bits();
-        Self { storage: AtomicU32::new(as_u32) }
-    }
-    pub fn store(&self, value: f32, ordering: Ordering) {
-        let as_u32 = value.to_bits();
-        self.storage.store(as_u32, ordering)
-    }
-    pub fn load(&self, ordering: Ordering) -> f32 {
-        let as_u32 = self.storage.load(ordering);
-        f32::from_bits(as_u32)
-    }
-
-    pub fn compare_exchange(&self, current: f32, new: f32, success: Ordering, failure: Ordering) -> Result<f32, f32> {
-        let current_as_u32 = current.to_bits();
-        let new_as_u32 = new.to_bits();
-        match self.storage.compare_exchange(current_as_u32, new_as_u32, success, failure) {
-            Ok(_) => Ok(current),
-            Err(actual) => Err(f32::from_bits(actual))
-        }
     }
 }
 
@@ -494,10 +468,8 @@ impl<'a, R: Fn() -> f32 + Clone> ListOfSkips<R> {
 
 #[derive(Debug)]
 pub struct ReservoirSampler<R: Fn() -> f32 + Clone = fn() -> f32> {
-    random: R,
     list_of_skips: ListOfSkips<R>,
     sample_size: u32,
-    n_threads: u32,
     // We will probably have to increment a version counter on every modification. I think this is probably neccesary
     // for recovery once it is implemented to be able to see what has to be undone/redone.
     // We will then just log the version with any modification to the LoS to the WAL
@@ -518,10 +490,8 @@ impl<'a, R: Fn() -> f32 + Clone> ReservoirSampler<R> {
 
     fn with_random(sample_size: u32, n_threads: u32, random: R) -> ReservoirSampler<R> {
         ReservoirSampler {
-            random: random.clone(),
             list_of_skips: ListOfSkips::new(n_threads, sample_size, random),
             sample_size,
-            n_threads,
             snapshot_latch: RwLock::new(()),
         }
     }
@@ -531,10 +501,8 @@ impl<'a, R: Fn() -> f32 + Clone> ReservoirSampler<R> {
         let sample_size = raw_cursor.read_u32::<BigEndian>().unwrap();
         let los = ListOfSkips::from_bytes(&raw[4..], n_threads, sample_size, random.clone());  
         return ReservoirSampler {
-            random,
             list_of_skips: los,
             sample_size,
-            n_threads,
             snapshot_latch: RwLock::new(()),
         }      
     }

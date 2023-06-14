@@ -71,7 +71,7 @@ impl EmptyAlignedSlice for AlignedSlice {
 // Safe variant of the above function. Likely uses more memory.
 // We could overallocate and then use a subslice which wastes memory and isn't nice either.
 pub fn alligned_slice(size: usize, align: usize) -> AlignedSlice {
-    let mut padded_slice = vec![0u8; size + align - 1].into_boxed_slice();
+    let padded_slice = vec![0u8; size + align - 1].into_boxed_slice();
     let start_padding = (align - ((padded_slice.as_ptr() as usize) % align)) % align;
     AlignedSlice {
         padded_slice,

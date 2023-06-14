@@ -1,28 +1,10 @@
 use std::io::{Cursor};
-use std::error::Error;
 use std::convert::TryInto;
-use std::fmt::{Display, Formatter};
 use std::ops::{Deref, DerefMut};
 use byteorder::{BigEndian, WriteBytesExt, ReadBytesExt};
 
 use crate::util::align::AlignedSlice;
 use crate::util::align::EmptyAlignedSlice;
-
-#[derive(Debug)]
-pub enum PageError {
-    NotEnoughSpace{ has: u16, need: usize }
-}
-
-impl Display for PageError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
-        match self {
-            PageError::NotEnoughSpace{ has, need } => 
-                f.write_fmt(format_args!("Not enough space on page, has {}, needs {}", has, need))
-        }
-    }
-}
-
-impl Error for PageError{}
 
 // Were using 16kb pages for now. 
 // Thomas Neumann told us to go for at least this so we will do exactly that for now
@@ -99,6 +81,7 @@ impl Page {
     }
 
     #[inline(always)]
+    #[allow(dead_code)]
     pub fn get_u16_tuple(&self, pos: usize) -> (u16, u16) {
         let mut cursor = Cursor::new(&*self.data);
         cursor.set_position(pos as u64);
@@ -108,6 +91,7 @@ impl Page {
     }
 
     #[inline(always)]
+    #[allow(dead_code)]
     pub fn set_u16(&mut self, pos: usize, val: u16) {
         let mut bytes = Vec::with_capacity(2);
         bytes.write_u16::<BigEndian>(val).unwrap();
@@ -116,6 +100,7 @@ impl Page {
     }
 
     #[inline(always)]
+    #[allow(dead_code)]
     pub fn set_u32(&mut self, pos: usize, val: u32) {
         let bytes = val.to_be_bytes();
         self.data[pos..pos+4].copy_from_slice(&bytes);

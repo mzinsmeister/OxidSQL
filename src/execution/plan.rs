@@ -141,9 +141,10 @@ pub enum ArithmeticExpression{
  }
 
  impl PhysicalQueryPlan {
-        pub fn new(root_operator: PhysicalQueryPlanOperator, cost: f64) -> Self {
-            Self { root_operator, cost }
-        }
+    #[allow(dead_code)]
+    pub fn new(root_operator: PhysicalQueryPlanOperator, cost: f64) -> Self {
+        Self { root_operator, cost }
+    }
  }
 
  #[cfg(test)]

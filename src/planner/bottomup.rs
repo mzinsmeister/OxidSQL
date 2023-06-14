@@ -7,9 +7,9 @@ use std::{collections::BTreeMap};
 
 use atomic::Ordering;
 
-use crate::{execution::{plan::{PhysicalQueryPlan, self, PhysicalQueryPlanOperator, StdOutTupleWriter}, engine::{volcano_style, ExecutionEngine}}, optimizer::{query_graph::QueryGraph, optimizer::{run_dp_ccp, OptimizerResult}}, types::{TupleValue, TupleValueType}, planner::BoundTableRef, catalog::{Catalog, self, AttributeDesc, SAMPLE_SIZE}, storage::buffer_manager::BufferManager, access::{SlottedPageHeapStorage, SlottedPageSegment, HeapStorage}};
+use crate::{execution::{plan::{PhysicalQueryPlan, self, PhysicalQueryPlanOperator, StdOutTupleWriter}}, optimizer::{query_graph::QueryGraph, optimizer::{run_dp_ccp, OptimizerResult}}, types::{TupleValue, TupleValueType}, planner::BoundTableRef, catalog::{Catalog, AttributeDesc, SAMPLE_SIZE}, storage::buffer_manager::BufferManager, access::{SlottedPageHeapStorage, SlottedPageSegment, HeapStorage}};
 
-use super::{Planner, Query, PlannerError, BoundAttribute, SelectionOperator, Selection, SelectQuery, InsertQuery, CreateTableQuery};
+use super::{Planner, Query, PlannerError, BoundAttribute, SelectionOperator, SelectQuery, InsertQuery, CreateTableQuery};
 
 pub struct BottomUpPlanner<B: BufferManager> {
     buffer_manager: B,
@@ -260,7 +260,7 @@ mod test {
         let plan = planner.plan(query).unwrap();
         assert_eq!(plan.cost, 0.0);
         match plan.root_operator {
-            PhysicalQueryPlanOperator::Print { input, tuple_writer } => {
+            PhysicalQueryPlanOperator::Print { input, tuple_writer: _ } => {
                 match *input {
                     PhysicalQueryPlanOperator::Projection { projection_ius, input } => {
                         assert_eq!(projection_ius, vec![0]);

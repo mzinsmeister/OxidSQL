@@ -38,14 +38,17 @@ pub struct BoundParseAttribute<'a> {
 }
 
 impl<'a> BoundParseAttribute<'a> {
+    #[allow(dead_code)]
     pub fn new(name: &'a str, binding: Option<&'a str>) -> BoundParseAttribute<'a> {
         BoundParseAttribute { name, binding }
     }
 
+    #[allow(dead_code)]
     pub fn new_bound(binding: &'a str, name: &'a str) -> BoundParseAttribute<'a> {
         BoundParseAttribute { name, binding: Some(binding) }
     }
 
+    #[allow(dead_code)]
     pub fn new_unbound(name: &'a str) -> BoundParseAttribute<'a> {
         BoundParseAttribute { name, binding: None }
     }
@@ -68,14 +71,17 @@ pub struct BoundParseTable<'a> {
 }
 
 impl<'a> BoundParseTable<'a> {
+    #[allow(dead_code)]
     pub fn new(name: &'a str, binding: Option<&'a str>) -> BoundParseTable<'a> {
         BoundParseTable { name, binding }
     }
 
+    #[allow(dead_code)]
     pub fn new_bound(name: &'a str, binding: &'a str) -> BoundParseTable<'a> {
         BoundParseTable { name, binding: Some(binding) }
     }
 
+    #[allow(dead_code)]
     pub fn new_unbound(name: &'a str) -> BoundParseTable<'a> {
         BoundParseTable { name, binding: None }
     }

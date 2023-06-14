@@ -26,7 +26,8 @@ impl Slot {
     fn new(offset: u32, length: u32) -> Slot {
         Slot::Slot { offset, length }
     }
-
+    
+    #[allow(dead_code)]
     fn new_reference(tid: RelationTID) -> Slot {
         Slot::Redirect { tid }
     }
@@ -35,6 +36,7 @@ impl Slot {
         Slot::RedirectTarget { offset, length }
     }
 
+    #[allow(dead_code)]
     fn get_data_offset_length(&self) -> (u32, u32) {
         match self {
             Slot::Slot { offset, length } => (*offset, *length),
@@ -121,6 +123,7 @@ impl<B: BufferManager> SlottedPageSegment<B> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn get_max_record_size() -> usize {
         PAGE_SIZE - HEADER_SIZE - SLOT_SIZE
     }
@@ -218,6 +221,7 @@ impl<B: BufferManager> SlottedPageSegment<B> {
         }, |_| true, None)
     }
 
+    #[allow(dead_code)]
     pub fn allocate(&self, size: u16) -> Result<RelationTID, B::BError> {
         self.allocate_and_do(size as usize, |_, _, _ , _| {Ok(())}, |_| true, None)
     }
@@ -232,7 +236,7 @@ impl<B: BufferManager> SlottedPageSegment<B> {
         };
         let mut slotted_redirect_target_page = SlottedPage::new(redirect_target_page_write);
         let orig_slot = slotted_redirect_target_page.get_slot(redirect_tid.slot_id);
-        if let Slot::RedirectTarget { offset, length } = orig_slot {
+        if let Slot::RedirectTarget { offset: _, length } = orig_slot {
             let root_relocate_result = slotted_root_page.relocate(tid.slot_id, size);
             if root_relocate_result {
                 if let Slot::Slot { offset, length } = slotted_root_page.get_slot(tid.slot_id) {
@@ -337,6 +341,7 @@ impl<B: BufferManager> SlottedPageSegment<B> {
         self.resize_and_do(tid, data.len(), false, |record| record.copy_from_slice(data))
     }
 
+    #[allow(dead_code)]
     pub fn resize_record(&self, tid: RelationTID, size: usize) -> Result<(), B::BError> {
         self.resize_and_do(tid, size, true, |_| {})
     }
@@ -479,6 +484,7 @@ fn get_slot_from_page(page: &Page, slot_id: u16) -> Slot {
     (&page[slot_offset..slot_offset + 8]).into()
 }
 
+#[allow(dead_code)]
 fn get_data_from_page(page: &Page, data_start: usize) -> &[u8] {
     &page[data_start as usize..]
 }
@@ -519,10 +525,12 @@ impl<A: Deref<Target = Page>> SlottedPage<A> {
         data_start as usize - HEADER_SIZE - 8 * slot_count
     }
 
+    #[allow(dead_code)]
     fn get_data(&self) -> &[u8] {
         get_data_from_page(&self.page, self.get_data_start() as usize)
     }
 
+    #[allow(dead_code)]
     fn get_data_length(&self) -> u32 {
         self.page.len() as u32 - self.get_data_start()
     }
@@ -531,6 +539,7 @@ impl<A: Deref<Target = Page>> SlottedPage<A> {
         get_record_from_page(&self.page, offset, length)
     }
 
+    #[allow(dead_code)]
     fn read_record(&self, slot_id: u16) -> Option<&[u8]> {
         match self.get_slot(slot_id) {
             Slot::Slot { offset, length } => Some(self.get_record(offset, length)),

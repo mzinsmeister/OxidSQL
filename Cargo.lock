@@ -3,28 +3,6 @@
 version = 3
 
 [[package]]
-name = "OxidSQL"
-version = "0.1.0"
-dependencies = [
- "aes",
- "ahash",
- "atomic",
- "bitvec",
- "byteorder",
- "hex",
- "itertools",
- "libc",
- "mockall",
- "nom",
- "parking_lot",
- "petgraph",
- "rand",
- "rustyline",
- "tempfile",
- "zerocopy",
-]
-
-[[package]]
 name = "aes"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -481,6 +459,28 @@ name = "once_cell"
 version = "1.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9670a07f94779e00908f3e686eab508878ebb390ba6e604d3a284c00e8d0487b"
+
+[[package]]
+name = "oxid_sql"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "ahash",
+ "atomic",
+ "bitvec",
+ "byteorder",
+ "hex",
+ "itertools",
+ "libc",
+ "mockall",
+ "nom",
+ "parking_lot",
+ "petgraph",
+ "rand",
+ "rustyline",
+ "tempfile",
+ "zerocopy",
+]
 
 [[package]]
 name = "parking_lot"

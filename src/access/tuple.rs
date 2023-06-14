@@ -1,4 +1,4 @@
-use std::{io::{Cursor, Read, Write}, mem::size_of, ops::{DerefMut, IndexMut, Deref}, borrow::{BorrowMut, Borrow}, marker::PhantomData};
+use std::{io::{Cursor, Read, Write}, mem::size_of, ops::{DerefMut}, borrow::{BorrowMut}};
 
 use bitvec::{vec::BitVec, bitvec};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
@@ -160,7 +160,6 @@ impl Tuple {
                     TupleValue::ByteArray(value) => {
                         length += value.len() + 2;
                     },
-                    _ => panic!("Cannot write data {:#?} at the moment", value)
                 }
             }
         }
@@ -197,7 +196,6 @@ impl Tuple {
                         var_atts.push((cursor.position(), value));
                         cursor.write_u16::<BigEndian>(0).unwrap(); // Write 0 as placeholder
                     },
-                    _ => panic!("Cannot write data {:#?} at the moment", value)
                 }
             } else {
                 let null_byte = &mut null_bytes[i / 8];

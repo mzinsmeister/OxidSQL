@@ -2,14 +2,9 @@ use std::{sync::{Arc, atomic::{Ordering, AtomicU64, AtomicU32}}, collections::BT
 
 use parking_lot::RwLock;
 
-use crate::{access::{SlottedPageSegment, tuple::Tuple, SlottedPageHeapStorage, HeapStorage}, storage::{buffer_manager::BufferManager, page::SegmentId}, types::{TupleValueType, TupleValue, RelationTID}, statistics::{counting_hyperloglog::{CountingHyperLogLog, self}, sampling::ReservoirSampler}, config::DbConfig};
+use crate::{access::{SlottedPageSegment, tuple::Tuple, SlottedPageHeapStorage, HeapStorage}, storage::{buffer_manager::BufferManager, page::SegmentId}, types::{TupleValueType, TupleValue, RelationTID}, statistics::{counting_hyperloglog::{CountingHyperLogLog}, sampling::ReservoirSampler}, config::DbConfig};
 
 type DbObjectRef = u32;
-
-pub struct ColumnRef {
-    table_ref: DbObjectRef,
-    column_id: u32
-}
 
 /*
     Catalog tables concept:
@@ -58,6 +53,7 @@ impl TableDesc {
         self.attributes.iter().find(|a| a.name == name)
     }
 
+    #[allow(dead_code)]
     pub fn get_attribute_by_id(&self, id: u32) -> Option<&AttributeDesc> {
         self.attributes.iter().find(|a| a.id == id)
     }
@@ -70,14 +66,12 @@ impl TableDesc {
 #[derive(Clone)]
 pub struct Catalog<B: BufferManager> {
     cache: Arc<CatalogCache<B>>,
-    db_config: Arc<DbConfig>
 }
 
 impl<B: BufferManager> Catalog<B> {
     pub fn new(buffer_manager: B, db_config: Arc<DbConfig>) -> Result<Catalog<B>, B::BError> {
         Ok(Catalog {
             cache: Arc::new(CatalogCache::new(buffer_manager, db_config.clone())?),
-            db_config
         })
     }
 
@@ -385,6 +379,7 @@ impl<B: BufferManager> DbObjectCatalogSegment<B> {
         }
     }
 
+    #[allow(dead_code)]
     fn get_db_object_by_id(&self, id: u32) -> Result<Option<DbObjectDesc>, B::BError> {
         self.find_first_db_object(|db_object_desc| db_object_desc.id == id).map(|e| e.map(|(_, d)| d))
     }
@@ -399,6 +394,7 @@ impl<B: BufferManager> DbObjectCatalogSegment<B> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn update_db_object(&self, db_object: &DbObjectDesc) -> Result<(), B::BError> {
         let (tid, _) = self.find_first_db_object(|db_object_desc| db_object_desc.id == db_object.id)?.unwrap();
         let tuple = Tuple::from(db_object);
@@ -513,6 +509,7 @@ impl<B: BufferManager> AttributeCatalogSegment<B> {
         .collect()
     }
 
+    #[allow(dead_code)]
     fn get_attribute_by_db_object_and_name(&self, db_object_id: u32, name: &str) -> Result<Option<AttributeDesc>, B::BError> {
         let result = self.sp_segment.scan_all(|data| {
             let attribute_desc = AttributeDesc::from(data);
@@ -531,6 +528,7 @@ impl<B: BufferManager> AttributeCatalogSegment<B> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn update_attribute(&self, attribute: AttributeDesc) -> Result<(), B::BError> {
         let (tid, _) = self.sp_segment.scan_all(|data| {
             let attribute_desc = AttributeDesc::from(data);
@@ -621,6 +619,7 @@ impl<B: BufferManager> AttributeStatisticsCatalogSegment<B> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn delete_attribute_statistics(&self, attribute_statistics: AttributeStatistics) -> Result<(), B::BError> {
         self.sp_segment.delete_tuple(attribute_statistics.tid)?;
         Ok(())
@@ -664,7 +663,7 @@ impl<B: BufferManager> TableStatisticsCatalogSegment<B> {
         }
     }
 
-    fn get_table_statistics_by_db_object(&self, db_object_id: u32) -> Result<Option<TableStatistics>, B::BError> {
+    fn get_table_statistics_by_db_object(&self, _db_object_id: u32) -> Result<Option<TableStatistics>, B::BError> {
         let result = self.sp_segment.scan_all(|data| {
             let db_object_id = match data.values[0] {
                 Some(TupleValue::Int(db_object_id)) => db_object_id as u32,
@@ -711,6 +710,7 @@ impl<B: BufferManager> TableStatisticsCatalogSegment<B> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn delete_table_statistics(&self, table_statistics: TableStatistics) -> Result<(), B::BError> {
         self.sp_segment.delete_tuple(table_statistics.tid)?;
         Ok(())
@@ -752,9 +752,9 @@ mod test {
     #[test]
     fn test_catalog_segment_attributes_by_db_object() {
         let buffer_manager = MockBufferManager::new(PAGE_SIZE);
-        let catalog_segment = DbObjectCatalogSegment::new(buffer_manager.clone());
+        let _catalog_segment = DbObjectCatalogSegment::new(buffer_manager.clone());
         let attribute_catalog_segment = AttributeCatalogSegment::new(buffer_manager.clone());
-        let db_object_desc = DbObjectDesc { id: 0, name: "db_object".to_string(), class_type: DbObjectType::Relation, segment_id: 1, fsi_segment_id: Some(2), sample_segment_id: None,  sample_fsi_segment_id: None };
+        let _db_object_desc = DbObjectDesc { id: 0, name: "db_object".to_string(), class_type: DbObjectType::Relation, segment_id: 1, fsi_segment_id: Some(2), sample_segment_id: None,  sample_fsi_segment_id: None };
         let attribute_descs = vec![
             AttributeDesc { id: 0, name: "attribute".to_string(), data_type: TupleValueType::VarChar(232), nullable: false, table_ref: 0 },
             AttributeDesc { id: 1, name: "abc".to_string(), data_type: TupleValueType::BigInt, nullable: true, table_ref: 0 },

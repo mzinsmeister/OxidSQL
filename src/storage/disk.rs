@@ -44,7 +44,7 @@ enum AccessType {
 
 impl DiskManager {
   #[cfg(unix)]
-  fn open_file(&self, segment_id: SegmentId, access: AccessType) -> File {
+  fn open_file(&self, segment_id: SegmentId, _access: AccessType) -> File {
     use std::os::unix::prelude::OpenOptionsExt;
 
     let file = self.file_cache.read().get(&segment_id).map(|f| f.try_clone());

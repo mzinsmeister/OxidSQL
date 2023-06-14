@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use itertools::Itertools;
 
-use crate::{execution::plan::{PhysicalQueryPlanOperator, self}, planner::{BoundTableRef, BoundAttribute, BoundAttributeRef}};
+use crate::{execution::plan::{PhysicalQueryPlanOperator, self}, planner::{BoundTableRef, BoundAttributeRef}};
 
 use super::query_graph::{QueryGraph};
 
@@ -26,7 +26,7 @@ enum DpJoinRepresentation {
 impl DpJoinRepresentation {
     fn get_cost(&self) -> f64 {
         match self {
-            DpJoinRepresentation::Relation(input_id, _, _) => {
+            DpJoinRepresentation::Relation(_input_id, _, _) => {
                 0.0
             }
             DpJoinRepresentation::Join(_, _, _, cost, _) => {
@@ -35,6 +35,7 @@ impl DpJoinRepresentation {
         }
     }
 
+    #[allow(dead_code)]
     fn get_size(&self) -> f64 {
         match self {
             DpJoinRepresentation::Relation(_, size, _) => {
@@ -170,7 +171,7 @@ fn dp_get_operator_tree(query_graph: &QueryGraph, dp_table: &HashMap<BTreeSet<Bo
             let num_attributes = query_graph.get_node(input_id).input.table.attributes.len();
             (operator.clone(), vec![(input_id.clone(), num_attributes)], *size)
         },
-        DpJoinRepresentation::Join(left, right, predicates, cost, output_card) => {
+        DpJoinRepresentation::Join(left, right, predicates, _cost, output_card) => {
             let (mut left_tree, mut left_order, left_size) = dp_get_operator_tree(query_graph, dp_table, &left);
             let (mut right_tree, mut right_order, right_size) = dp_get_operator_tree(query_graph, dp_table, &right);
             if left_size > right_size {
