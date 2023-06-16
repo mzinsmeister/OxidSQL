@@ -124,9 +124,9 @@ impl<B: BufferManager> BottomUpPlanner<B> {
                 let mut sample_table = relation.table.clone();
                 sample_table.segment_id = sample_table.sample_segment_id;
                 sample_table.fsi_segment_id = sample_table.sample_fsi_segment_id;
-                sample_table.attributes.insert(0, AttributeDesc { id: 0, table_ref: relation_id.table_ref, name: "__TID__".to_string(), data_type: TupleValueType::BigInt, nullable: false });
-                sample_table.attributes.insert(0, AttributeDesc { id: 0, table_ref: relation_id.table_ref, name: "__SKIP_INDEX__".to_string(), data_type: TupleValueType::BigInt, nullable: false });
-                sample_table.attributes.insert(0, AttributeDesc { id: 0, table_ref: relation_id.table_ref, name: "__INDEX__".to_string(), data_type: TupleValueType::BigInt, nullable: false });
+                sample_table.attributes.insert(0, AttributeDesc { id: u32::MAX, table_ref: relation_id.table_ref, name: "__TID__".to_string(), data_type: TupleValueType::BigInt, nullable: false });
+                sample_table.attributes.insert(0, AttributeDesc { id: u32::MAX, table_ref: relation_id.table_ref, name: "__SKIP_INDEX__".to_string(), data_type: TupleValueType::BigInt, nullable: false });
+                sample_table.attributes.insert(0, AttributeDesc { id: u32::MAX, table_ref: relation_id.table_ref, name: "__INDEX__".to_string(), data_type: TupleValueType::BigInt, nullable: false });
                 
                 let sample_segment = SlottedPageSegment::new(self.buffer_manager.clone(), sample_table.segment_id, sample_table.fsi_segment_id);
                 let sample_heap = SlottedPageHeapStorage::new(sample_segment, sample_table.attributes.iter().map(|a| a.data_type).collect());
