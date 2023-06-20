@@ -725,4 +725,6 @@ mod test {
         engine.execute(root_operator, buffer_manager).unwrap();
         assert_eq!(tuple_writer.tuples.borrow().clone(), tuples);
     }
+
+    // TODO: TEST (INSERT and CREATE TABLE)
 }

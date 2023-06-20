@@ -440,4 +440,6 @@ mod test {
             panic!("Analyzer didn't return the correct error");
         }
     }
+
+    // TODO: TEST (INSERT and CREATE TABLE)
 }

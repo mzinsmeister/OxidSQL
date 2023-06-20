@@ -632,4 +632,6 @@ mod tests {
         assert_eq!(page[1000], 234);
         assert_eq!(page[PAGE_SIZE - 1], 21);
     }
+
+    // TODO: TEST (Segment size correctly updated in all cases)
 }

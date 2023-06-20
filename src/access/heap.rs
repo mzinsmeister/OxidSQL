@@ -382,3 +382,5 @@ impl<B: BufferManager> HeapStorage<B> for StatisticsCollectingSPHeapStorage<B> {
         self.storage.scan_to_tuple(tuple, attributes, predicate)
     }
 }
+
+// TODO: TEST (SPHeapStorage and StatisticsCollecting)
