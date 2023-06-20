@@ -280,9 +280,6 @@ impl<'a, V: BorrowMut<Option<TupleValue>> + 'a> MutatingTupleParser<'a, V> {
 
 #[cfg(test)]
 mod test {
-
-    // TODO: Test the partial parsing and "parse into" stuff
-
     use super::*;
 
     const TEST_BINARY: &[u8] = &[0x00, 0x00, 0x00, 0x00, 0b10000000, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x02, 'a' as u8, 'b' as u8];

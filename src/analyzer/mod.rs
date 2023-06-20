@@ -273,7 +273,7 @@ mod test {
 
     use std::sync::Arc;
 
-    use crate::{storage::{buffer_manager::mock::MockBufferManager, page::PAGE_SIZE}, catalog::{TableDesc, AttributeDesc}, types::{TupleValueType, TupleValue}, parser::BoundParseTable, planner::BoundTableRef, config::DbConfig};
+    use crate::{storage::{buffer_manager::mock::MockBufferManager, page::PAGE_SIZE}, catalog::{TableDesc, AttributeDesc}, types::{TupleValueType, TupleValue}, parser::{BoundParseTable, CreateTableColumn}, planner::BoundTableRef, config::DbConfig};
 
     use super::*;
 
@@ -441,5 +441,39 @@ mod test {
         }
     }
 
-    // TODO: TEST (INSERT and CREATE TABLE)
+    #[test]
+    fn test_create_table() {
+        let catalog = get_catalog(MockBufferManager::new(PAGE_SIZE));
+        let analyzer = Analyzer::new(catalog);
+        let parse_tree = ParseTree::CreateTable(CreateTableParseTree {
+            name: "people",
+            table_definition: vec![
+                TableDefinitionItem::ColumnDefinition { definition: CreateTableColumn {
+                    name: "id",
+                    column_type: TupleValueType::Int,
+                }, is_primary_key: true },
+                TableDefinitionItem::ColumnDefinition { definition: CreateTableColumn {
+                    name: "name",
+                    column_type: TupleValueType::VarChar(255),
+                }, is_primary_key: false },
+            ]
+        });
+        let query = analyzer.analyze(parse_tree).unwrap();
+        if let Query::CreateTable(query) = query {
+            assert_eq!(query.table.id, 1);
+            assert_eq!(query.table.name, "people");
+            assert_eq!(query.table.attributes.len(), 2);
+            assert_eq!(query.table.attributes[0].id, 1);
+            assert_eq!(query.table.attributes[0].name, "id");
+            assert_eq!(query.table.attributes[0].data_type, TupleValueType::Int);
+            assert_eq!(query.table.attributes[0].nullable, true);
+
+            assert_eq!(query.table.attributes[1].id, 2);
+            assert_eq!(query.table.attributes[1].name, "name");
+            assert_eq!(query.table.attributes[1].data_type, TupleValueType::VarChar(255));
+            assert_eq!(query.table.attributes[1].nullable, true);
+        } else {
+            panic!("Query is not a create table query");
+        }
+    }
 }

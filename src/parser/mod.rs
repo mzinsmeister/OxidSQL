@@ -421,6 +421,8 @@ mod test {
 
     // TODO: Test the parser
 
+    use crate::access::tuple::Tuple;
+
     use super::*;
 
     #[test]
@@ -576,6 +578,29 @@ mod test {
         test_parse_error(query);
     }
 
+    #[test]
+    fn test_parse_insert() {
+        let query = "INSERT INTO test VALUES (1, 2)";
+
+        test_parse(query, ParseTree::Insert(InsertParseTree {
+            table: "test",
+            values: vec![Some(TupleValue::BigInt(1)), Some(TupleValue::BigInt(2))]
+        }));
+    }
+
+    #[test]
+    fn test_create_table() {
+        let query = "CREATE TABLE test (a int, b varchar(255))";
+
+        test_parse(query, ParseTree::CreateTable(CreateTableParseTree {
+            name: "test",
+            table_definition: vec![
+                TableDefinitionItem::ColumnDefinition { definition: CreateTableColumn { name: "a", column_type: TupleValueType::Int }, is_primary_key: false },
+                TableDefinitionItem::ColumnDefinition { definition: CreateTableColumn { name: "b", column_type: TupleValueType::VarChar(255) }, is_primary_key: false },
+            ]
+        }));
+    }
+
     fn test_parse(query: &str, expected: ParseTree) {
         let parse_tree = parse_query(query);
 
@@ -595,4 +620,5 @@ mod test {
 
         assert!(parse_tree.is_err());
     }
+
 }

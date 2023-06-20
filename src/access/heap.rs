@@ -383,4 +383,7 @@ impl<B: BufferManager> HeapStorage<B> for StatisticsCollectingSPHeapStorage<B> {
     }
 }
 
-// TODO: TEST (SPHeapStorage and StatisticsCollecting)
+#[cfg(test)]
+mod test {
+    // TODO: TEST (SPHeapStorage and StatisticsCollecting)
+}

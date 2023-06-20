@@ -101,7 +101,7 @@ impl<B: BufferManager> BottomUpPlanner<B> {
         for (from_attribute, to_attribute) in &query.join_predicates {
             // We again assume uniqueness (very stupid assumption)
             let cross_cardinality = relation_cardinalities[&from_attribute.get_table_ref()] * relation_cardinalities[&to_attribute.get_table_ref()];
-            let result_cardinality = relation_cardinalities[&from_attribute.get_table_ref()].min(relation_cardinalities[&to_attribute.get_table_ref()]);
+            let result_cardinality = relation_cardinalities[&from_attribute.get_table_ref()].max(relation_cardinalities[&to_attribute.get_table_ref()]); // bad upper bound
             let selectivity = if cross_cardinality == 0 { 1.0 } else { result_cardinality as f64 / cross_cardinality as f64 };
             query_graph.add_edge(&from_attribute.get_table_ref(), &to_attribute.get_table_ref(), selectivity, (from_attribute.to_ref(), to_attribute.to_ref()));
         }
@@ -202,7 +202,7 @@ mod test {
     use std::sync::Arc;
 
     use super::*;
-    use crate::{catalog::{TableDesc, AttributeDesc}, types::TupleValueType, planner::{BoundAttribute, BoundTable}, storage::{buffer_manager::mock::MockBufferManager, page::PAGE_SIZE}, config::DbConfig};
+    use crate::{access::{tuple::Tuple, StatisticsCollectingSPHeapStorage}, catalog::{TableDesc, AttributeDesc}, types::TupleValueType, planner::{BoundAttribute, BoundTable, Selection}, storage::{buffer_manager::mock::MockBufferManager, page::PAGE_SIZE}, config::DbConfig};
 
     #[test]
     fn test_plan_single_relation_query() {
@@ -278,5 +278,330 @@ mod test {
         }
     }
 
-    // TODO: TEST (INSERT and CREATE TABLE)
+    #[test]
+    fn test_plan_two_relation_query() {
+        let table0 = TableDesc {
+            id: 0,
+            segment_id: 1000,
+            fsi_segment_id: 1001,
+            sample_segment_id: 1002,
+            sample_fsi_segment_id: 1003,
+            name: "test".to_string(),
+            attributes: vec![
+                AttributeDesc {
+                    id: 1,
+                    name: "id".to_string(),
+                    table_ref: 0,
+                    data_type: TupleValueType::Int,
+                    nullable: false,
+                },
+                AttributeDesc {
+                    id: 2,
+                    name: "name".to_string(),
+                    table_ref: 0,
+                    data_type: TupleValueType::VarChar(500),
+                    nullable: false,
+                },
+            ],
+        };
+
+        let table1 = TableDesc {
+            id: 1,
+            segment_id: 2000,
+            fsi_segment_id: 2001,
+            sample_segment_id: 2002,
+            sample_fsi_segment_id: 2003,
+            name: "test2".to_string(),
+            attributes: vec![
+                AttributeDesc {
+                    id: 11,
+                    name: "id2".to_string(),
+                    table_ref: 1,
+                    data_type: TupleValueType::Int,
+                    nullable: false,
+                },
+                AttributeDesc {
+                    id: 12,
+                    name: "name2".to_string(),
+                    table_ref: 1,
+                    data_type: TupleValueType::VarChar(500),
+                    nullable: false,
+                },
+                AttributeDesc {
+                    id: 13,
+                    name: "0id".to_string(),
+                    table_ref: 1,
+                    data_type: TupleValueType::Int,
+                    nullable: true,
+                },
+            ],
+        };
+
+        let query = Query::Select(SelectQuery {
+            select: vec![
+                BoundAttribute {
+                    attribute: AttributeDesc {
+                        id: 1,
+                        name: "id".to_string(),
+                        table_ref: 0,
+                        data_type: TupleValueType::Int,
+                        nullable: false,
+                    },
+                    binding: Some("a".to_string())
+                },
+                BoundAttribute {
+                    attribute: AttributeDesc {
+                        id: 11,
+                        name: "id".to_string(),
+                        table_ref: 1,
+                        data_type: TupleValueType::Int,
+                        nullable: false,
+                    },
+                    binding: Some("b".to_string())
+                }
+            ],
+            from: BTreeMap::from_iter(vec![(BoundTableRef { 
+                table_ref: 0,
+                binding: Some("a".to_string())
+             }, BoundTable {
+                binding: Some("a".to_string()),
+                table: table0.clone()}), 
+            (BoundTableRef { 
+                    table_ref: 1,
+                    binding: Some("b".to_string())
+                 }, BoundTable {
+                    binding: Some("b".to_string()),
+                    table: table1.clone()})].iter().cloned()),
+            selections: Vec::new(),
+            join_predicates: vec![(BoundAttribute {
+                attribute: AttributeDesc {
+                    id: 1,
+                    name: "id".to_string(),
+                    table_ref: 0,
+                    data_type: TupleValueType::Int,
+                    nullable: false,
+                },
+                binding: Some("a".to_string())
+            }, BoundAttribute {
+                attribute: AttributeDesc {
+                    id: 13,
+                    name: "0id".to_string(),
+                    table_ref: 1,
+                    data_type: TupleValueType::Int,
+                    nullable: true,
+                },
+                binding: Some("b".to_string())
+            })],
+        });
+        let mock_bm = MockBufferManager::new(PAGE_SIZE);
+        let catalog = Catalog::new(mock_bm.clone(), Arc::new(DbConfig { n_threads: 4 })).unwrap();
+        catalog.create_table(&table0).unwrap();
+        catalog.create_table(&table1).unwrap();
+        let planner = BottomUpPlanner { buffer_manager: mock_bm.clone(), catalog };
+        let plan = planner.plan(query).unwrap();
+        assert_eq!(plan.cost, 0.0);
+        match plan.root_operator {
+            PhysicalQueryPlanOperator::Print { input, tuple_writer: _ } => {
+                match *input {
+                    PhysicalQueryPlanOperator::Projection { projection_ius, input } => {
+                        assert_eq!(projection_ius, vec![0, 2]);
+                        match *input {
+                            PhysicalQueryPlanOperator::HashJoin { left, right, on } => {
+                                match *left {
+                                    PhysicalQueryPlanOperator::Tablescan { table } => {
+                                        assert_eq!(table, table0);
+                                    },
+                                    _ => unreachable!()
+                                }
+                                match *right {
+                                    PhysicalQueryPlanOperator::Tablescan { table } => {
+                                        assert_eq!(table, table1);
+                                    },
+                                    _ => unreachable!()
+                                }
+                                assert_eq!(on, vec![(0, 2)]);
+                            },
+                            _ => unreachable!()
+                        }
+                    },
+                    _ => unreachable!()
+                }
+            }
+            _ => unreachable!() 
+        }
+    }
+
+    #[test]
+    fn test_plan_insert() {
+        let table0 = TableDesc {
+            id: 0,
+            segment_id: 1000,
+            fsi_segment_id: 1001,
+            sample_segment_id: 1002,
+            sample_fsi_segment_id: 1003,
+            name: "test".to_string(),
+            attributes: vec![
+                AttributeDesc {
+                    id: 1,
+                    name: "id".to_string(),
+                    table_ref: 1,
+                    data_type: TupleValueType::Int,
+                    nullable: false,
+                },
+                AttributeDesc {
+                    id: 2,
+                    name: "name".to_string(),
+                    table_ref: 1,
+                    data_type: TupleValueType::VarChar(500),
+                    nullable: false,
+                },
+            ],
+        };
+
+        let query = Query::Insert(InsertQuery { table: table0.clone(), values: vec![Tuple::new(vec![Some(TupleValue::Int(1)), Some(TupleValue::String("test".to_string()))])]});
+        let mock_bm = MockBufferManager::new(PAGE_SIZE);
+        let catalog = Catalog::new(mock_bm.clone(), Arc::new(DbConfig { n_threads: 4 })).unwrap();
+        let planner = BottomUpPlanner { buffer_manager: mock_bm.clone(), catalog };
+        let plan = planner.plan(query).unwrap();
+        assert_eq!(plan.cost, 0.0);
+        match plan.root_operator {
+            PhysicalQueryPlanOperator::Insert { input, table} => {
+                assert_eq!(table, table0);
+                match *input {
+                    PhysicalQueryPlanOperator::InlineTable { tuples } => {
+                        assert_eq!(tuples, vec![Tuple::new(vec![Some(TupleValue::Int(1)), Some(TupleValue::String("test".to_string()))])]);
+                    },
+                    _ => unreachable!()
+                }
+            }
+            _ => unreachable!() 
+        }
+    }
+
+    #[test]
+    fn test_plan_create_table() {
+        let table0 = TableDesc {
+            id: 0,
+            segment_id: 1000,
+            fsi_segment_id: 1001,
+            sample_segment_id: 1002,
+            sample_fsi_segment_id: 1003,
+            name: "test".to_string(),
+            attributes: vec![
+                AttributeDesc {
+                    id: 1,
+                    name: "id".to_string(),
+                    table_ref: 1,
+                    data_type: TupleValueType::Int,
+                    nullable: false,
+                },
+                AttributeDesc {
+                    id: 2,
+                    name: "name".to_string(),
+                    table_ref: 1,
+                    data_type: TupleValueType::VarChar(500),
+                    nullable: false,
+                },
+            ],
+        };
+
+        let query = Query::CreateTable(CreateTableQuery { table: table0.clone() });
+        let mock_bm = MockBufferManager::new(PAGE_SIZE);
+        let catalog = Catalog::new(mock_bm.clone(), Arc::new(DbConfig { n_threads: 4 })).unwrap();
+        let planner = BottomUpPlanner { buffer_manager: mock_bm.clone(), catalog };
+        let plan = planner.plan(query).unwrap();
+        assert_eq!(plan.cost, 0.0);
+        match plan.root_operator {
+            PhysicalQueryPlanOperator::CreateTable { table } => {
+                assert_eq!(table, table0);
+            }
+            _ => unreachable!() 
+        }
+    }
+
+    #[test]
+    fn test_cardinality_estimation() {
+        let table0 = TableDesc {
+            id: 0,
+            segment_id: 1000,
+            fsi_segment_id: 1001,
+            sample_segment_id: 1002,
+            sample_fsi_segment_id: 1003,
+            name: "test".to_string(),
+            attributes: vec![
+                AttributeDesc {
+                    id: 1,
+                    name: "id".to_string(),
+                    table_ref: 1,
+                    data_type: TupleValueType::Int,
+                    nullable: false,
+                },
+                AttributeDesc {
+                    id: 2,
+                    name: "name".to_string(),
+                    table_ref: 1,
+                    data_type: TupleValueType::VarChar(500),
+                    nullable: false,
+                },
+            ],
+        };
+
+        let mock_bm = MockBufferManager::new(PAGE_SIZE);
+        let catalog = Catalog::new(mock_bm.clone(), Arc::new(DbConfig { n_threads: 4 })).unwrap();
+        catalog.create_table(&table0).unwrap();
+        let storage = StatisticsCollectingSPHeapStorage::new(&table0, mock_bm.clone(), catalog.clone(), SAMPLE_SIZE as usize).unwrap();
+        let mut tuples = vec![
+            Tuple::new(vec![Some(TupleValue::Int(1)), Some(TupleValue::String("test".to_string()))]),
+            Tuple::new(vec![Some(TupleValue::Int(2)), Some(TupleValue::String("test".to_string()))]),
+            Tuple::new(vec![Some(TupleValue::Int(3)), Some(TupleValue::String("test".to_string()))]),
+            Tuple::new(vec![Some(TupleValue::Int(4)), Some(TupleValue::String("test".to_string()))]),
+            Tuple::new(vec![Some(TupleValue::Int(5)), Some(TupleValue::String("test".to_string()))]),
+            Tuple::new(vec![Some(TupleValue::Int(6)), Some(TupleValue::String("test".to_string()))]),
+            Tuple::new(vec![Some(TupleValue::Int(7)), Some(TupleValue::String("test".to_string()))]),
+            Tuple::new(vec![Some(TupleValue::Int(8)), Some(TupleValue::String("test".to_string()))]),
+            Tuple::new(vec![Some(TupleValue::Int(9)), Some(TupleValue::String("test".to_string()))]),
+            Tuple::new(vec![Some(TupleValue::Int(10)), Some(TupleValue::String("test".to_string()))]),
+        ];
+        storage.insert_tuples(&mut tuples).unwrap();
+        let planner = BottomUpPlanner { buffer_manager: mock_bm.clone(), catalog };
+        let query = SelectQuery {
+            select: vec![
+                BoundAttribute {
+                    attribute: AttributeDesc {
+                        id: 1,
+                        name: "id".to_string(),
+                        table_ref: 0,
+                        data_type: TupleValueType::Int,
+                        nullable: false,
+                    },
+                    binding: None
+                }
+            ],
+            from: BTreeMap::from_iter(vec![(BoundTableRef { 
+                table_ref: 0,
+                binding: None
+             }, BoundTable {
+                binding: None,
+                table: table0.clone()})].iter().cloned()),
+            selections: vec![Selection {attribute: BoundAttribute {
+                attribute: AttributeDesc {
+                    id: 1,
+                    name: "id".to_string(),
+                    table_ref: 0,
+                    data_type: TupleValueType::Int,
+                    nullable: false,
+                },
+                binding: None
+            }, operator: SelectionOperator::LessThan, value: TupleValue::Int(5)}],
+            join_predicates: Vec::new(),
+        };
+        
+        let estimations = planner.get_cardinality_estimates(&query).unwrap();
+
+        assert_eq!(estimations.0.get(&BoundTableRef { 
+            table_ref: 0,
+            binding: None
+         }).unwrap(), &4u64);
+
+    }
 }

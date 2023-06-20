@@ -499,7 +499,7 @@ mod mock {
 mod test {
     use std::{rc::Rc, cell::RefCell, sync::Arc};
 
-    use crate::{storage::{page::PAGE_SIZE, buffer_manager::mock::MockBufferManager}, access::{SlottedPageSegment, tuple::Tuple}, types::{TupleValue, TupleValueType}, execution::{plan::{PhysicalQueryPlan, PhysicalQueryPlanOperator, mock::MockTupleWriter}, engine::volcano_style::{Selection, ArithmeticExpression, Print}}, catalog::{AttributeDesc, TableDesc, Catalog}, config::DbConfig};
+    use crate::{storage::{page::PAGE_SIZE, buffer_manager::mock::MockBufferManager}, access::{SlottedPageSegment, tuple::Tuple, SlottedPageHeapStorage, HeapStorage}, types::{TupleValue, TupleValueType}, execution::{plan::{PhysicalQueryPlan, PhysicalQueryPlanOperator, mock::MockTupleWriter}, engine::volcano_style::{Selection, ArithmeticExpression, Print}}, catalog::{AttributeDesc, TableDesc, Catalog}, config::DbConfig};
 
     use super::{super::ExecutionEngine, Operator, mock::MockVolcanoSourceOperator, new_scan}; 
 
@@ -726,5 +726,59 @@ mod test {
         assert_eq!(tuple_writer.tuples.borrow().clone(), tuples);
     }
 
-    // TODO: TEST (INSERT and CREATE TABLE)
+    #[test]
+    fn test_insert() {
+        let buffer_manager = MockBufferManager::new(PAGE_SIZE);
+        let tuples = vec![
+            Tuple::new(vec![Some(TupleValue::Int(1)), Some(TupleValue::String("a".to_string()))]),
+            Tuple::new(vec![Some(TupleValue::Int(2)), Some(TupleValue::String("b".to_string()))]),
+            Tuple::new(vec![Some(TupleValue::Int(3)), Some(TupleValue::String("c".to_string()))]),
+        ];
+        let root_operator = PhysicalQueryPlan::new(
+            PhysicalQueryPlanOperator::Insert {
+                input: Box::new(PhysicalQueryPlanOperator::InlineTable { tuples: tuples.clone() }),
+                table: get_testtable_desc()
+            },
+            200.0
+        );
+        // Catalog is not used here, so we can just create a dummy one
+        let catalog = Catalog::new(buffer_manager.clone(), Arc::new(DbConfig { n_threads: 4 })).unwrap();
+        catalog.create_table(&TableDesc { 
+            id: 0,
+            name: "test".to_string(),
+            attributes: vec![
+                AttributeDesc{ id: 0, name: "a".to_string(), data_type: TupleValueType::Int, table_ref: 0, nullable: false },
+                AttributeDesc{ id: 1, name: "b".to_string(), data_type: TupleValueType::VarChar(10), table_ref: 0, nullable: false }
+            ],
+            segment_id: 1000, 
+            fsi_segment_id: 1001, 
+            sample_segment_id: 1002,
+            sample_fsi_segment_id: 1003 
+        }).unwrap();
+        let engine = super::Engine::new(catalog);
+        engine.execute(root_operator, buffer_manager.clone()).unwrap(); 
+        let sp_segment = SlottedPageSegment::new(buffer_manager.clone(), 1000, 1001);
+        let heap_storage = SlottedPageHeapStorage::new(sp_segment, vec![TupleValueType::Int, TupleValueType::VarChar(10)]);
+        let mut scan = heap_storage.scan_all(|_| true).unwrap();
+        for tuple in tuples {
+            assert_eq!(scan.next().unwrap().unwrap().1, tuple);
+        }
+        assert!(scan.next().is_none());
+    }
+
+    #[test]
+    fn test_create_table() {
+        let buffer_manager = MockBufferManager::new(PAGE_SIZE);
+        let root_operator = PhysicalQueryPlan::new(
+            PhysicalQueryPlanOperator::CreateTable {
+                table: get_testtable_desc()
+            },
+            0.0
+        );
+        let catalog = Catalog::new(buffer_manager.clone(), Arc::new(DbConfig { n_threads: 4 })).unwrap();
+        let engine = super::Engine::new(catalog.clone());
+        engine.execute(root_operator, buffer_manager).unwrap(); 
+        let result = catalog.find_table_by_name("TESTTABLE").unwrap().unwrap();
+        assert_eq!(result, get_testtable_desc());
+    }
 }
