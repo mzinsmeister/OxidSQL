@@ -32,8 +32,8 @@ we will for now also assume that we won't have to spool to disk (otherwise we co
 on OS swapping for this purpose for now).
 
 ## What currently works:
- - Create Schema through direct rust inserts into the catalog tables
- - Insert data through direct rust inserts into the tables
+ - Simple CREATE TABLE
+ - Simple INSERT (INSERT INTO x VALUES (a,b,c))
  - Simple select from where including simple predicates with <,>,>=,<=,= and 
      equi-joins in "attribute = attribute" style (currently only "AND" supported)
  - Analysis, planning and optimization (DPccp for now, will do DPhyp later)
