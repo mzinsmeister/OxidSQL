@@ -61,4 +61,11 @@ pub mod sampling;
 
     Generally the findings of this paper should be followed: https://www.vldb.org/pvldb/vol9/p204-leis.pdf
 
+    Since the data structures maintained for the statistics are in-memory and will
+    only be written to disk for checkpoints or on (regular) shutdown we will have to
+    take some kind of exclusive lock on all modifications to stop all modifications to the database
+    for a very short amount of time while we take a consistent snapshot of our statistics data-structures
+    that we then write to disk. This should be fine since this will only happen every few minutes and will
+    only take a few microseconds to milliseconds. Another possibility would be just writing it on orderly
+    shutdown and rebuilding on recovery.
  */

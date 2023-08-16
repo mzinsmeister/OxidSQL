@@ -1,12 +1,13 @@
 use ahash::RandomState;
-use parking_lot::{RwLock, Mutex, MutexGuard};
+use parking_lot::lock_api::{ArcRwLockWriteGuard, ArcRwLockReadGuard, ArcRwLockUpgradableReadGuard};
+use parking_lot::{RwLock, Mutex, MutexGuard, RawRwLock};
 
 use crate::storage::page::{Page, PageState};
 use crate::util::align::alligned_slice;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{Display, Debug};
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -21,6 +22,100 @@ pub struct BMArc<B: BufferManager> {
     unfix: Box<dyn Fn(&B, PageId, &PageType)>
 }
 
+pub struct BMArcReadGuard<B: BufferManager> {
+    // Don't change this order, it's important for the drop order
+    bmarc: BMArc<B>,
+    page: ArcRwLockReadGuard<RawRwLock, Page>,
+}
+
+impl<B: BufferManager> BMArcReadGuard<B> {
+    fn new(bmarc: BMArc<B>) -> BMArcReadGuard<B> {
+        let page = bmarc.page.read_arc();
+        BMArcReadGuard {
+            bmarc,
+            page
+        }
+    }
+
+    pub fn unlock(self) -> BMArc<B> {
+        self.bmarc
+    }
+}
+
+/// This is not free because UpgradeableReadGuards are exclusive with regard
+/// to other UpgradeableReadGuards and of course also with WriteGuards.
+/// If the likelyhood that you will not need to upgrade is high, use the
+/// upgradeable one since it will allow concurrent non-upgradeable reads.
+pub struct BMArcUpgradeableReadGuard<B: BufferManager> {
+    // Don't change this order, it's important for the drop order
+    bmarc: BMArc<B>,
+    page: ArcRwLockUpgradableReadGuard<RawRwLock, Page>,
+}
+
+impl<B: BufferManager> BMArcUpgradeableReadGuard<B> {
+    fn new(bmarc: BMArc<B>) -> BMArcUpgradeableReadGuard<B> {
+        let page = bmarc.page.upgradable_read_arc();
+        BMArcUpgradeableReadGuard {
+            bmarc,
+            page
+        }
+    }
+
+    pub fn upgrade(self) -> BMArcWriteGuard<B> {
+        let page = ArcRwLockUpgradableReadGuard::upgrade(self.page);
+        BMArcWriteGuard {
+            bmarc: self.bmarc,
+            page
+        }
+    }
+
+    pub fn unlock(self) -> BMArc<B> {
+        self.bmarc
+    }
+}
+
+impl<B: BufferManager> Deref for BMArcReadGuard<B> {
+    type Target = Page;
+
+    fn deref(&self) -> &Self::Target {
+        &self.page
+    }
+}
+
+pub struct BMArcWriteGuard<B: BufferManager> {
+    // Don't change this order, it's important for the drop order
+    bmarc: BMArc<B>,
+    page: ArcRwLockWriteGuard<RawRwLock, Page>,
+}
+
+impl<B: BufferManager> BMArcWriteGuard<B> {
+    fn new(bmarc: BMArc<B>) -> BMArcWriteGuard<B> {
+        let page = bmarc.page.write_arc();
+        BMArcWriteGuard {
+            bmarc,
+            page
+        }
+    }
+
+    pub fn unlock(self) -> BMArc<B> {
+        self.bmarc
+    }
+}
+
+impl<B: BufferManager> Deref for BMArcWriteGuard<B> {
+    type Target = Page;
+
+    fn deref(&self) -> &Self::Target {
+        &self.page
+    }
+}
+
+impl<B: BufferManager> DerefMut for BMArcWriteGuard<B> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.page
+    }
+}
+
 impl<'a, B: BufferManager> BMArc<B> {
     pub fn new(page: Arc<RwLock<Page>>, page_id: PageId, buffer_manager: B, unfix: Box<dyn Fn(&B, PageId, &PageType)>) -> BMArc<B> {
         BMArc {
@@ -31,17 +126,13 @@ impl<'a, B: BufferManager> BMArc<B> {
         }
     }
 
-    /* This works but it has problems since it allows you to drop the BMArc 
-       without actually having dropped the Arc
-    pub fn write_owning(&self) -> ArcRwLockWriteGuard<RawRwLock, Page> {
-        self.page.write_arc()
+    pub fn write_owning(self) -> BMArcWriteGuard<B> {
+        BMArcWriteGuard::new(self)
     }
 
-    pub fn read_owning(&self) -> ArcRwLockReadGuard<RawRwLock, Page> {
-        self.page.read_arc()
+    pub fn read_owning(self) -> BMArcReadGuard<B> {
+        BMArcReadGuard::new(self)
     }
-    */
-    
 }
 
 impl<'a, B: BufferManager> Deref for BMArc<B> {
@@ -71,6 +162,10 @@ fn new_page(page_id: PageId) -> PageType {
     Arc::new(RwLock::new(Page::new(page_id)))
 }
 
+
+// TODO: Remove this ugly integrated hash table and try to use something like DashMap
+//       (Harder than you think. It probably requires using the raw-api to 
+//        get a solution with similar properties. Also it might not actually be that much faster)
 #[derive(Debug)]
 pub(super) struct PageTableBucket {
     bucket: Vec<(PageId, PageType)>

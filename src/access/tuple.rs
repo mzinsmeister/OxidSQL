@@ -1,4 +1,4 @@
-use std::{io::{Cursor, Read, Write}, mem::size_of, ops::{DerefMut}, borrow::{BorrowMut}};
+use std::{io::{Cursor, Read, Write}, mem::size_of, ops::{DerefMut, Deref}, borrow::{BorrowMut, Borrow}};
 
 use bitvec::{vec::BitVec, bitvec};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
@@ -24,17 +24,102 @@ use crate::types::{TupleValue, TupleValueType};
  */
 // TODO: Implement flags
 #[derive(Debug, PartialEq, Clone)]
-pub struct Tuple<V: BorrowMut<Option<TupleValue>> = Option<TupleValue>, C: DerefMut<Target=[V]> = Vec<V>> {
+pub struct Tuple<V: Borrow<Option<TupleValue>> = Option<TupleValue>, C: Deref<Target=[V]> = Vec<V>> {
     pub flags: u32,
     pub values: C,
 }
 
-impl<V: BorrowMut<Option<TupleValue>>, C: DerefMut<Target=[V]>> Tuple<V,C> {
-
+impl<V: Borrow<Option<TupleValue>>, C: Deref<Target=[V]>> Tuple<V,C> {
     #[inline]
     pub fn new(values: C) -> Tuple<V,C> {
         Tuple { values, flags: 0 }
     }
+
+    #[inline]
+    pub fn calculate_binary_length(&self) -> usize {
+        let num_null_bytes = self.values.len() / 8 + 1;
+        let mut length = num_null_bytes + 4;
+        for value in self.values.iter() {
+            if let Some(value) = value.borrow() {
+                match value {
+                    TupleValue::BigInt(_) => {
+                        length += 8;
+                    },
+                    TupleValue::String(value) => {
+                        length += value.len() + 2;
+                    }
+                    TupleValue::Int(_) => {
+                        length += 4;
+                    },
+                    TupleValue::SmallInt(_) => {
+                        length += 2;
+                    },
+                    TupleValue::ByteArray(value) => {
+                        length += value.len() + 2;
+                    },
+                }
+            }
+        }
+        length
+    }
+
+    #[inline]
+    pub fn write_binary(&self, buffer: &mut [u8]) {
+        let num_null_bytes = self.values.len() / 8 + 1;
+        let mut null_bytes = vec![0u8; num_null_bytes];
+        let mut var_atts = Vec::new();
+        let mut cursor = Cursor::new(buffer);
+        // first write a placeholder for the flags bitmap
+        cursor.write_u32::<BigEndian>(0).unwrap();
+        // first write a placeholder for the null bitmap
+        cursor.write(&null_bytes).unwrap();
+        for (i, value) in self.values.iter().enumerate() {
+            if let Some(value) = value.borrow() {
+                match value {
+                    TupleValue::BigInt(value) => {
+                        cursor.write_i64::<BigEndian>(*value).unwrap();
+                    },
+                    TupleValue::String(value) => {
+                        var_atts.push((cursor.position(), value.as_bytes()));
+                        cursor.write_u16::<BigEndian>(0).unwrap(); // Write 0 as placeholder
+                    }
+                    TupleValue::Int(value) => {
+                        cursor.write_i32::<BigEndian>(*value).unwrap();
+                    },
+                    TupleValue::SmallInt(value) => {
+                        cursor.write_i16::<BigEndian>(*value).unwrap();
+                    },
+                    TupleValue::ByteArray(value) => {
+                        var_atts.push((cursor.position(), value));
+                        cursor.write_u16::<BigEndian>(0).unwrap(); // Write 0 as placeholder
+                    },
+                }
+            } else {
+                let null_byte = &mut null_bytes[i / 8];
+                let null_bit_mask = 1 <<  (7 - (i % 8));
+                *null_byte |= null_bit_mask;
+            }
+        }
+        // now write the variable length attributes
+        for (index, value) in var_atts {
+            cursor.write(value).unwrap();
+            cursor.set_position(index as u64);
+            let position = cursor.position();
+            cursor.set_position(index);
+            cursor.write_u16::<BigEndian>(value.len() as u16).unwrap();
+            cursor.set_position(position);
+        }
+        cursor.set_position(4);
+        cursor.write(&null_bytes).unwrap();
+    }
+
+    #[inline]
+    pub fn get_binary(&self) -> Box<[u8]> {
+        self.into()
+    }
+}
+
+impl<V: BorrowMut<Option<TupleValue>>, C: DerefMut<Target=[V]>> Tuple<V,C> {
 
     #[inline]
     // Be careful! The length of values needs to be at least the number of 1's set in the parse_attributes BitVec
@@ -137,93 +222,10 @@ impl Tuple {
         Self::parse_binary_partial_into(&mut tuple, attributes, parse_attributes, src);
         tuple
     }
-
-    #[inline]
-    pub fn calculate_binary_length(&self) -> usize {
-        let num_null_bytes = self.values.len() / 8 + 1;
-        let mut length = num_null_bytes + 4;
-        for value in self.values.iter() {
-            if let Some(value) = value {
-                match value {
-                    TupleValue::BigInt(_) => {
-                        length += 8;
-                    },
-                    TupleValue::String(value) => {
-                        length += value.len() + 2;
-                    }
-                    TupleValue::Int(_) => {
-                        length += 4;
-                    },
-                    TupleValue::SmallInt(_) => {
-                        length += 2;
-                    },
-                    TupleValue::ByteArray(value) => {
-                        length += value.len() + 2;
-                    },
-                }
-            }
-        }
-        length
-    }
-
-    #[inline]
-    pub fn write_binary(&self, buffer: &mut [u8]) {
-        let num_null_bytes = self.values.len() / 8 + 1;
-        let mut null_bytes = vec![0u8; num_null_bytes];
-        let mut var_atts = Vec::new();
-        let mut cursor = Cursor::new(buffer);
-        // first write a placeholder for the flags bitmap
-        cursor.write_u32::<BigEndian>(0).unwrap();
-        // first write a placeholder for the null bitmap
-        cursor.write(&null_bytes).unwrap();
-        for (i, value) in self.values.iter().enumerate() {
-            if let Some(value) = value {
-                match value {
-                    TupleValue::BigInt(value) => {
-                        cursor.write_i64::<BigEndian>(*value).unwrap();
-                    },
-                    TupleValue::String(value) => {
-                        var_atts.push((cursor.position(), value.as_bytes()));
-                        cursor.write_u16::<BigEndian>(0).unwrap(); // Write 0 as placeholder
-                    }
-                    TupleValue::Int(value) => {
-                        cursor.write_i32::<BigEndian>(*value).unwrap();
-                    },
-                    TupleValue::SmallInt(value) => {
-                        cursor.write_i16::<BigEndian>(*value).unwrap();
-                    },
-                    TupleValue::ByteArray(value) => {
-                        var_atts.push((cursor.position(), value));
-                        cursor.write_u16::<BigEndian>(0).unwrap(); // Write 0 as placeholder
-                    },
-                }
-            } else {
-                let null_byte = &mut null_bytes[i / 8];
-                let null_bit_mask = 1 <<  (7 - (i % 8));
-                *null_byte |= null_bit_mask;
-            }
-        }
-        // now write the variable length attributes
-        for (index, value) in var_atts {
-            cursor.write(value).unwrap();
-            cursor.set_position(index as u64);
-            let position = cursor.position();
-            cursor.set_position(index);
-            cursor.write_u16::<BigEndian>(value.len() as u16).unwrap();
-            cursor.set_position(position);
-        }
-        cursor.set_position(4);
-        cursor.write(&null_bytes).unwrap();
-    }
-
-    #[inline]
-    pub fn get_binary(&self) -> Box<[u8]> {
-        self.into()
-    }
 }
 
-impl From<&Tuple> for Box<[u8]> {
-    fn from(value: &Tuple) -> Self {
+impl<V: Borrow<Option<TupleValue>>, C: Deref<Target=[V]>>  From<&Tuple<V,C>> for Box<[u8]> {
+    fn from(value: &Tuple<V,C>) -> Self {
         let mut buffer = vec![0u8; value.calculate_binary_length()];
         value.write_binary(&mut buffer);
         buffer.into_boxed_slice()

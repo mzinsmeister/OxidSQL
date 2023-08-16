@@ -20,6 +20,7 @@ atomic = "0.5.3"
 bitvec = "1.0.1"
 aes = "0.8.2"
 hex = "0.4.3"
+sqlparser = "0.35.0"
 
 [dev-dependencies]
 tempfile = "3"

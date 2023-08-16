@@ -5,7 +5,7 @@ use crate::{storage::{buffer_manager::{BufferManager, BMArc}, page::{Page, PAGE_
 use super::{free_space_inventory::FreeSpaceSegment, tuple::{Tuple, TupleParser, MutatingTupleParser}};
 
 // We implement a safe variant for now. Transmuting stuff like the header will likely lead to more
-// readable code but would need unsafe
+// readable code but would need unsafe (maybe possible with zerocopy)
 
 // 16 bit slot count, 16 bit first free slot, 32 bit data start, 32 bit free space
 const HEADER_SIZE: usize = 2 * 4 + 2 * 2; 
@@ -414,6 +414,7 @@ impl<'a, V: BorrowMut<Option<TupleValue>> + 'a> ScanFunction<()> for MutatingTup
     }
 }
 
+// Probably just cache all the tuples from a single page instead of constantly locking and unlocking the page
 pub struct SlottedPageScan<B: BufferManager, T, F: ScanFunction<T>> {
     segment: SlottedPageSegment<B>,
     page: Option<BMArc<B>>,

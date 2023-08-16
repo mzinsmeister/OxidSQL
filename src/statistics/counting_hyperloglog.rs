@@ -16,8 +16,7 @@
 
  */
 
-use std::sync::atomic::{AtomicU8};
-use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{Ordering::Relaxed, AtomicU8};
 
 use itertools::Itertools;
 
@@ -164,6 +163,11 @@ impl<R: Fn(f64) -> bool> CountingHyperLogLog<R> {
     pub fn to_bytes(&self) -> [u8; 59 * 64] {
         self.into()
     }
+    
+    // TODO: Implement merge/union and intersection 
+    //      (Not as trivial as for non-counting HLLs because we 
+    //       have to deal with probabilistic counters)
+
 }
 
 /// Make sure you only call this when you're sure that the CountingHyperLogLog is not being updated
