@@ -8,9 +8,9 @@ use std::{mem::size_of, cmp::Ordering, ops::Deref};
 use byteorder::{BigEndian, NativeEndian};
 use zerocopy::{AsBytes, FromBytes, LayoutVerified, ByteSlice, ByteSliceMut, Unaligned, U16, U32, U64};
 
-use crate::{storage::{buffer_manager::{BufferManager, BMArcReadGuard}, page::{SegmentId, PageId, Page}}, types::{TupleValue, RelationTID, TupleValueType}};
+use crate::{storage::{buffer_manager::{BufferManager, BMArcReadGuard, BMArc}, page::{SegmentId, PageId, Page}}, types::{TupleValue, RelationTID, TupleValueType}};
 
-use super::{index::{OrderedIndex, Index}, tuple::{Tuple}};
+use super::{index::{OrderedIndex, Index}, tuple::Tuple};
 
 pub struct BTreeSegment<B: BufferManager> {
     bm: B,
@@ -27,15 +27,15 @@ impl<B: BufferManager> BTreeSegment<B> {
         }
     }
 
-    fn lookup_leaf_page<T: Deref<Target=Page>>(&self, key: &[Option<TupleValue>], relock_leaf: fn(BMArcReadGuard<B>) -> T)-> Result<T, B::BError> {
-        let mut parent_page = self.bm.fix_page(PageId::new(self.segment_id, 0))?.read_owning();
+    fn lookup_leaf_page<T: Deref<Target=Page>>(&self, key: &[Option<TupleValue>], lock: fn(BMArc<B>) -> T)-> Result<(T,T), B::BError> {
+        let mut parent_page = lock(self.bm.fix_page(PageId::new(self.segment_id, 0))?);
         let root_page: u64 = u64::from_be_bytes(parent_page[0..8].try_into().unwrap());
         let root_page = self.bm.fix_page(PageId::new(self.segment_id, root_page))?;
-        let mut current_page = root_page.read_owning();
+        let mut current_page = lock(root_page);
         loop {
             if current_page[1] & 1 == 1 {
                 // Leaf page
-                return Ok(relock_leaf(current_page));
+                return Ok((parent_page, current_page));
             }
             drop(parent_page);
             // Still inner nodes
@@ -46,14 +46,14 @@ impl<B: BufferManager> BTreeSegment<B> {
             });
             let next_page = self.bm.fix_page(PageId::new(self.segment_id, next_page_id))?;
             parent_page = current_page;
-            current_page = next_page.read_owning();
+            current_page = lock(next_page);
         }
     }
 }
 
 impl<B: BufferManager> Index<B> for BTreeSegment<B> {
     fn lookup(&self, key: &[Option<TupleValue>]) -> Result<Option<RelationTID>, B::BError> {
-        let leaf_page_raw = self.lookup_leaf_page(key, |b| b)?;
+        let (_, leaf_page_raw) = self.lookup_leaf_page(key, |b| b.read_owning())?;
         let leaf_page = BTreeLeafPage::parse(leaf_page_raw.as_ref()).unwrap();
         Ok(leaf_page.binary_search(|val| {
             let tuple = Tuple::parse_binary_all(&self.key_attributes, val);
@@ -66,18 +66,21 @@ impl<B: BufferManager> Index<B> for BTreeSegment<B> {
         // if we need to split the leaf page, we will retry and take a stack of write latches all the way down
         // Since we have variable length keys (potentially, but we won't optimize the fixed-size case for now)
         // we cannot do eager splitting and will instead have to split on demand
-        let mut page = self.lookup_leaf_page(key, |r| r.unlock().write_owning())?;
-        let mut leaf_page = BTreeLeafPage::parse(page.as_mut()).unwrap();
+        let (parent_page, page) = self.lookup_leaf_page(key, |r| r.upgradeable_read_owning())?;
+        let leaf_page = BTreeLeafPage::parse(page.as_ref()).unwrap();
         let key_binary = Tuple::new(key).get_binary();
         if key_binary.len() + 8 + 8 <= leaf_page.header.free_space.get() as usize {
             // don't need to split -> just insert
+            let mut upgraded_page = page.upgrade();
+            let mut leaf_page = BTreeLeafPage::parse(upgraded_page.as_mut()).unwrap();
             leaf_page.insert(|val| {
                 let tuple = Tuple::parse_binary_all(&self.key_attributes, val);
                 key.partial_cmp(tuple.values.as_slice()).unwrap()
             }, &key_binary, tid).unwrap();
             Ok(())
         } else {
-            // need to split -> retry with write latches
+            // need to split -> does the parent have enough space? if yes upgrade parent latch and split
+            // else take write-latches all the way down and keep them
             drop(leaf_page);
             drop(page);
             let mut latch_stack = Vec::new();
@@ -342,7 +345,8 @@ impl<B: ByteSliceMut> BTreeLeafPage<B> {
         // Update self headers
         self.header.data_start.set(new_data_start as u32);
         self.header.free_space.set((self.data.len() - new_data_start) as u32);
-        self.header.slot_count.set(self.header.slot_count.get() - split_index - 1 as u16);
+        let new_slot_count = self.header.slot_count.get() - (split_index - 1) as u16;
+        self.header.slot_count.set(new_slot_count);
         // Update other headers
         other.header.data_start.set(other_data_start as u32);
         other.header.free_space.set((other_data_end - other_data_start) as u32);

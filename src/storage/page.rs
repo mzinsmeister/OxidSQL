@@ -1,4 +1,4 @@
-use std::io::{Cursor};
+use std::io::Cursor;
 use std::convert::TryInto;
 use std::ops::{Deref, DerefMut};
 use byteorder::{BigEndian, WriteBytesExt, ReadBytesExt};

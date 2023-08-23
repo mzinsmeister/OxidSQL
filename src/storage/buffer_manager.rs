@@ -74,6 +74,14 @@ impl<B: BufferManager> BMArcUpgradeableReadGuard<B> {
     }
 }
 
+impl<B: BufferManager> Deref for BMArcUpgradeableReadGuard<B> {
+    type Target = Page;
+
+    fn deref(&self) -> &Self::Target {
+        &self.page
+    }
+}
+
 impl<B: BufferManager> Deref for BMArcReadGuard<B> {
     type Target = Page;
 
@@ -128,6 +136,10 @@ impl<'a, B: BufferManager> BMArc<B> {
 
     pub fn write_owning(self) -> BMArcWriteGuard<B> {
         BMArcWriteGuard::new(self)
+    }
+
+    pub fn upgradeable_read_owning(self) -> BMArcUpgradeableReadGuard<B> {
+        BMArcUpgradeableReadGuard::new(self)
     }
 
     pub fn read_owning(self) -> BMArcReadGuard<B> {
