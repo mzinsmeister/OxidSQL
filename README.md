@@ -40,3 +40,16 @@ on OS swapping for this purpose for now).
  - Execution through a simple single threaded 
     volcano style interpreted engine printing the results to stdout (for now)
  - crashing and burning (no, but it panics) when someone enters a query that results in a cross product
+
+## Current and upcoming TODOs:
+ - Implement B+Tree based indexes
+ - Replace self-written SQL parser by the quite advanced sqlparser crate
+ - Try getting a postgres protocol based server to work with the pgwire crate
+ - Implement some basic SELECT additions like GROUP BY/HAVING, LIMIT, ORDER aswell as UPDATE and DELETE (and DROP TABLE)
+ - Properly integrate the HyperLogLog sketches that are already maintained on inserts into the optimizer especially for join selectivity estimation
+ - Implement Recovery
+ - Implement fast MVCC transactions
+ - Maybe move everything over to async (at least evaluate it)
+ - Maybe move everything over to optimistic locks
+ - Maybe move to a more advanced buffer manager (evaluate a very optimized hash table vs vmcache and ways to handle variable size)
+ - Implement a better execution engine (likely compiling)
