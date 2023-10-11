@@ -50,6 +50,6 @@ on OS swapping for this purpose for now).
  - Implement Recovery
  - Implement fast MVCC transactions
  - Maybe move everything over to async (at least evaluate it)
- - Maybe move everything over to optimistic locks
+ - Maybe move everything over to optimistic/hybrid latches (probably would have to implement them myself first)
  - Maybe move to a more advanced buffer manager (evaluate a very optimized hash table vs vmcache and ways to handle variable size)
  - Implement a better execution engine (likely compiling)
