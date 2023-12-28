@@ -1,7 +1,7 @@
 
-// TODO: Implement a B+Tree using (optimistic) latch crabbing
-// We will implement right-links on the leaf pages for now but not left-links bc. of deadlocks
+// Implementation of a B+Tree with right-links on the leaf pages for now but not left-links bc. of deadlocks
 // Could also implement a B-Link tree using latching approach described in Lehmans & Yao paper
+// like Postgres does but this should be good enough for a MVP
 
 use std::{mem::size_of, cmp::Ordering, ops::Deref};
 
@@ -231,6 +231,7 @@ impl<B: BufferManager> OrderedIndex<B> for BTreeSegment<B> {
     type ScanIterator = BTreeScan<B>;
 
     fn scan(&self, _from: Option<&[Option<TupleValue>]>, _to: Option<&[Option<TupleValue>]>) -> Result<Self::ScanIterator, <B as BufferManager>::BError> {
+        // TODO: Implement this (cache matching TIDs (at least up to a few thousand entryies) upon construction to hold locks for as short as possible?)
         todo!()
     }
 }
@@ -250,6 +251,8 @@ impl Slot {
         }
     }
 }
+
+// TODO: Split BTreePage up into BTreeInnerPage and BTreeLeafPage again?
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, AsBytes, FromBytes, FromZeroes, Unaligned)]
@@ -776,5 +779,7 @@ mod test {
         }
         assert!(scan.next().is_none());
     }
+
+    // TODO: Multithreaded tests
 
 }
