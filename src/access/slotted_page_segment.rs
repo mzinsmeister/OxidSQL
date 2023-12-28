@@ -5,7 +5,7 @@ use crate::{storage::{buffer_manager::{BufferManager, BMArc}, page::{Page, PAGE_
 use super::{free_space_inventory::FreeSpaceSegment, tuple::{Tuple, TupleParser, MutatingTupleParser}};
 
 // We implement a safe variant for now. Transmuting stuff like the header will likely lead to more
-// readable code but would need unsafe
+// readable code but would need unsafe (maybe possible with zerocopy)
 
 // 16 bit slot count, 16 bit first free slot, 32 bit data start, 32 bit free space
 const HEADER_SIZE: usize = 2 * 4 + 2 * 2; 
@@ -242,7 +242,6 @@ impl<B: BufferManager> SlottedPageSegment<B> {
                 if let Slot::Slot { offset, length } = slotted_root_page.get_slot(tid.slot_id) {
                     operation(slotted_root_page.get_record_mut(offset, length));
                     self.free_space_segment.update_page_size(tid.page_id, slotted_root_page.get_free_space())?;
-                    drop(slotted_root_page);
                     slotted_redirect_target_page.erase(redirect_tid.slot_id);
                     self.free_space_segment.update_page_size(redirect_tid.page_id, slotted_redirect_target_page.get_free_space())?;
                     return Ok(true);
@@ -253,7 +252,6 @@ impl<B: BufferManager> SlottedPageSegment<B> {
             let orig_relocate_result = slotted_redirect_target_page.relocate(redirect_tid.slot_id, size + 8);
             if orig_relocate_result {
                 if let Slot::RedirectTarget { offset, length } = slotted_redirect_target_page.get_slot(redirect_tid.slot_id) {
-                    drop(slotted_root_page);
                     operation(slotted_redirect_target_page.get_record_mut(offset + 8, length - 8));
                     self.free_space_segment.update_page_size(redirect_tid.page_id, slotted_redirect_target_page.get_free_space())?;
                     return Ok(true);
@@ -414,6 +412,7 @@ impl<'a, V: BorrowMut<Option<TupleValue>> + 'a> ScanFunction<()> for MutatingTup
     }
 }
 
+// Probably just cache all the tuples from a single page instead of constantly locking and unlocking the page
 pub struct SlottedPageScan<B: BufferManager, T, F: ScanFunction<T>> {
     segment: SlottedPageSegment<B>,
     page: Option<BMArc<B>>,

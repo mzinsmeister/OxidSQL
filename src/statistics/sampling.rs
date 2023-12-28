@@ -41,7 +41,7 @@ use std::sync::atomic::Ordering::Relaxed;
 
 use atomic::Ordering;
 use byteorder::{ReadBytesExt, BigEndian, WriteBytesExt};
-use parking_lot::{RwLock, RwLockReadGuard, Mutex};
+use parking_lot::Mutex;
 
 // Quick and Hacky Atomic f32, u32 tuple
 pub struct AtomicU32F32Tup {
@@ -134,10 +134,6 @@ pub struct SkipGuard<'a, R: Fn() -> f32 + Clone> {
     list_index: u32,
     skip: &'a Skip,
     sampler: &'a ReservoirSampler<R>,
-    // The snapshot latch is there to enable atomic snapshots of the list of skips
-    // Every SkipGuard gets a RwReadGuard so that we can make sure to only take
-    // a snapshot when no other thread is currently owning any SkipGuard
-    _snapshot_latch_guard: RwLockReadGuard<'a, ()>,
 }
 
 impl<'a, R: Fn() -> f32 + Clone> SkipGuard<'a, R> {
@@ -390,7 +386,11 @@ impl<'a, R: Fn() -> f32 + Clone> ListOfSkips<R> {
     /// Only call when there's no other thread accessing the list
     /// Otherwise we cannot possibly serialize the entire list since it might change
     /// while we're serializing it
-    /// We'll probably achieve this by using a RwLock over the entire 
+    /// This should probably only be called on orderly shutdown. For everything else we will just 
+    /// write the skip number that inserted a tuple to each tuple in the sample.
+    /// It should however be possible to reconstruct a pretty much equivalent skip list
+    /// by just initializing the sampler in a way that takes into account the total number of
+    /// tuples in the table.
     fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         let mut cursor = Cursor::new(&mut bytes);
@@ -470,10 +470,6 @@ impl<'a, R: Fn() -> f32 + Clone> ListOfSkips<R> {
 pub struct ReservoirSampler<R: Fn() -> f32 + Clone = fn() -> f32> {
     list_of_skips: ListOfSkips<R>,
     sample_size: u32,
-    // We will probably have to increment a version counter on every modification. I think this is probably neccesary
-    // for recovery once it is implemented to be able to see what has to be undone/redone.
-    // We will then just log the version with any modification to the LoS to the WAL
-    snapshot_latch: RwLock<()>,
 }
 
 impl ReservoirSampler<fn() -> f32> {
@@ -492,7 +488,6 @@ impl<'a, R: Fn() -> f32 + Clone> ReservoirSampler<R> {
         ReservoirSampler {
             list_of_skips: ListOfSkips::new(n_threads, sample_size, random),
             sample_size,
-            snapshot_latch: RwLock::new(()),
         }
     }
 
@@ -503,12 +498,10 @@ impl<'a, R: Fn() -> f32 + Clone> ReservoirSampler<R> {
         return ReservoirSampler {
             list_of_skips: los,
             sample_size,
-            snapshot_latch: RwLock::new(()),
         }      
     }
 
     pub fn get_skip(&'a self) -> SkipGuard<'a, R> {
-        let _snapshot_latch_guard = self.snapshot_latch.read();
         let (list_index, skip) = self.list_of_skips.get_skip();
         return SkipGuard {
             list_index,
@@ -517,17 +510,14 @@ impl<'a, R: Fn() -> f32 + Clone> ReservoirSampler<R> {
             skip_count: skip.length.load(Relaxed),
             skip_index: skip.index.load(Relaxed),
             proccessed: 0,
-            _snapshot_latch_guard
         }
     }
 
     pub fn delete_sample(&self, index: u32) {
-        let _snapshot_latch_guard = self.snapshot_latch.read();
         self.list_of_skips.delete_sample(index);
     } 
 
     pub fn delete_skipped(&self, n: usize) {
-        let _snapshot_latch_guard = self.snapshot_latch.read();
         // We successfully increased the number of skips
         // We can now delete the skipped tuple
         let mut skip = self.get_skip();
@@ -535,7 +525,6 @@ impl<'a, R: Fn() -> f32 + Clone> ReservoirSampler<R> {
     }
 
     pub fn snapshot(&self) -> Vec<u8> {
-        let _snapshot_latch = self.snapshot_latch.write();
         let mut bytes = Vec::new();
         let mut cursor = Cursor::new(&mut bytes);
         cursor.write_u32::<BigEndian>(self.sample_size).unwrap();

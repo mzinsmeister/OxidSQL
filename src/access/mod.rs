@@ -2,6 +2,7 @@ mod free_space_inventory;
 mod btree_segment;
 mod slotted_page_segment;
 mod heap;
+mod index;
 pub mod tuple;
 
 pub use self::btree_segment::*;

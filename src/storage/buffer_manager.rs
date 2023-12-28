@@ -1,12 +1,13 @@
 use ahash::RandomState;
-use parking_lot::{RwLock, Mutex, MutexGuard};
+use parking_lot::lock_api::{ArcRwLockWriteGuard, ArcRwLockReadGuard, ArcRwLockUpgradableReadGuard};
+use parking_lot::{RwLock, Mutex, MutexGuard, RawRwLock};
 
 use crate::storage::page::{Page, PageState};
 use crate::util::align::alligned_slice;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{Display, Debug};
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -21,6 +22,112 @@ pub struct BMArc<B: BufferManager> {
     unfix: Box<dyn Fn(&B, PageId, &PageType)>
 }
 
+pub struct BMArcReadGuard<B: BufferManager> {
+    // Don't change this order, it's important for the drop order
+    bmarc: BMArc<B>,
+    page: ArcRwLockReadGuard<RawRwLock, Page>,
+}
+
+impl<B: BufferManager> BMArcReadGuard<B> {
+    fn new(bmarc: BMArc<B>) -> BMArcReadGuard<B> {
+        let page = bmarc.page.read_arc();
+        BMArcReadGuard {
+            bmarc,
+            page
+        }
+    }
+
+    #[allow(dead_code)]    
+    pub fn unlock(self) -> BMArc<B> {
+        self.bmarc
+    }
+}
+
+/// This is not free because UpgradeableReadGuards are exclusive with regard
+/// to other UpgradeableReadGuards and of course also with WriteGuards.
+/// If the likelyhood that you will not need to upgrade is high, use the
+/// upgradeable one since it will allow concurrent non-upgradeable reads.
+pub struct BMArcUpgradeableReadGuard<B: BufferManager> {
+    // Don't change this order, it's important for the drop order
+    bmarc: BMArc<B>,
+    page: ArcRwLockUpgradableReadGuard<RawRwLock, Page>,
+}
+
+impl<B: BufferManager> BMArcUpgradeableReadGuard<B> {
+    fn new(bmarc: BMArc<B>) -> BMArcUpgradeableReadGuard<B> {
+        let page = bmarc.page.upgradable_read_arc();
+        BMArcUpgradeableReadGuard {
+            bmarc,
+            page
+        }
+    }
+
+    pub fn upgrade(self) -> BMArcWriteGuard<B> {
+        let page = ArcRwLockUpgradableReadGuard::upgrade(self.page);
+        BMArcWriteGuard {
+            bmarc: self.bmarc,
+            page
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn unlock(self) -> BMArc<B> {
+        self.bmarc
+    }
+}
+
+impl<B: BufferManager> Deref for BMArcUpgradeableReadGuard<B> {
+    type Target = Page;
+
+    fn deref(&self) -> &Self::Target {
+        &self.page
+    }
+}
+
+impl<B: BufferManager> Deref for BMArcReadGuard<B> {
+    type Target = Page;
+
+    fn deref(&self) -> &Self::Target {
+        &self.page
+    }
+}
+
+pub struct BMArcWriteGuard<B: BufferManager> {
+    // Don't change this order, it's important for the drop order
+    #[allow(dead_code)] // We need this for the destructor
+    bmarc: BMArc<B>,
+    page: ArcRwLockWriteGuard<RawRwLock, Page>,
+}
+
+impl<B: BufferManager> BMArcWriteGuard<B> {
+    fn new(bmarc: BMArc<B>) -> BMArcWriteGuard<B> {
+        let page = bmarc.page.write_arc();
+        BMArcWriteGuard {
+            bmarc,
+            page
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn unlock(self) -> BMArc<B> {
+        self.bmarc
+    }
+}
+
+impl<B: BufferManager> Deref for BMArcWriteGuard<B> {
+    type Target = Page;
+
+    fn deref(&self) -> &Self::Target {
+        &self.page
+    }
+}
+
+impl<B: BufferManager> DerefMut for BMArcWriteGuard<B> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.page
+    }
+}
+
 impl<'a, B: BufferManager> BMArc<B> {
     pub fn new(page: Arc<RwLock<Page>>, page_id: PageId, buffer_manager: B, unfix: Box<dyn Fn(&B, PageId, &PageType)>) -> BMArc<B> {
         BMArc {
@@ -31,17 +138,17 @@ impl<'a, B: BufferManager> BMArc<B> {
         }
     }
 
-    /* This works but it has problems since it allows you to drop the BMArc 
-       without actually having dropped the Arc
-    pub fn write_owning(&self) -> ArcRwLockWriteGuard<RawRwLock, Page> {
-        self.page.write_arc()
+    pub fn write_owning(self) -> BMArcWriteGuard<B> {
+        BMArcWriteGuard::new(self)
     }
 
-    pub fn read_owning(&self) -> ArcRwLockReadGuard<RawRwLock, Page> {
-        self.page.read_arc()
+    pub fn upgradeable_read_owning(self) -> BMArcUpgradeableReadGuard<B> {
+        BMArcUpgradeableReadGuard::new(self)
     }
-    */
-    
+
+    pub fn read_owning(self) -> BMArcReadGuard<B> {
+        BMArcReadGuard::new(self)
+    }
 }
 
 impl<'a, B: BufferManager> Deref for BMArc<B> {
@@ -71,6 +178,10 @@ fn new_page(page_id: PageId) -> PageType {
     Arc::new(RwLock::new(Page::new(page_id)))
 }
 
+
+// TODO: Remove this ugly integrated hash table and try to use something like DashMap
+//       (Harder than you think. It probably requires using the raw-api to 
+//        get a solution with similar properties. Also it might not actually be that much faster)
 #[derive(Debug)]
 pub(super) struct PageTableBucket {
     bucket: Vec<(PageId, PageType)>
@@ -140,6 +251,7 @@ pub trait BufferManager: Debug + Sync + Send + Sized + Clone + 'static {
     fn fix_page<'a>(&'a self, page_id: PageId) -> Result<BMArc<Self>, Self::BError>;
     fn flush(&self) -> Result<(), Self::BError>;
     fn segment_size(&self, segment_id: SegmentId) -> usize;
+    fn allocate_page(&self, segment_id: SegmentId) -> PageId;
 }
 
 #[derive(Debug)]
@@ -354,6 +466,17 @@ impl<R: Replacer + Send + 'static, S: StorageManager + 'static> BufferManager fo
             self.disk_manager.get_relation_size(segment_id) as usize / PAGE_SIZE
         }
     }
+
+    /// Gets the first PageId that is guaranteed to be free and extends the segment size by one page
+    fn allocate_page(&self, segment_id: SegmentId) -> PageId {
+        let mut segment_sizes = self.segment_sizes.write();
+        if !segment_sizes.contains_key(&segment_id) {
+            segment_sizes.insert(segment_id, self.disk_manager.get_relation_size(segment_id) as usize / PAGE_SIZE);
+        }
+        let new_pid = PageId::new(segment_id, segment_sizes[&segment_id] as u64);
+        *(segment_sizes.get_mut(&segment_id).unwrap()) += 1;
+        return new_pid;
+    }
 }
 
 impl<R: Replacer + Send, S: StorageManager> Drop for HashTableBufferManager<R, S> {
@@ -433,6 +556,20 @@ pub mod mock {
             } else {
                 0
             }
+        }
+
+        fn allocate_page(&self, segment_id: SegmentId) -> PageId {
+            let mut segments = self.segments.lock();
+            if !segments.contains_key(&segment_id) {
+                segments.insert(segment_id, HashMap::new());
+            }
+            let new_pid = PageId::new(segment_id, segments[&segment_id].len() as u64);
+            let new_page = new_page(new_pid);
+            let mut new_page_guard = new_page.write();
+            new_page_guard.data = alligned_slice(self.page_size, 1);
+            drop(new_page_guard);
+            segments.get_mut(&segment_id).unwrap().insert(new_pid.offset_id, new_page);
+            new_pid
         }
     }
 }

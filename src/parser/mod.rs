@@ -1,3 +1,6 @@
+// First gen parser for OxidSQL. I will probably integrate the sqlparser crate instead. 
+// There's not really much to gain from writing a parser from scratch, and it's a lot of work.
+
 /*
     TODO: Implement a parser for the SQL dialect supported by the database (likely using the nom
           parser combinator library). The parser should produce an abstract syntax tree (AST) that 
@@ -18,7 +21,7 @@ use nom::character::complete::{multispace0, multispace1, char, digit1};
 use nom::combinator::{opt, map_res, map};
 use nom::sequence::{delimited, tuple, preceded};
 use nom::branch::alt;
-use nom::character::{is_alphanumeric};
+use nom::character::is_alphanumeric;
 use nom::multi::separated_list1;
 use nom::error::ParseError;
 

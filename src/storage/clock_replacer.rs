@@ -40,7 +40,7 @@ impl Replacer for ClockReplacer {
     // We do at best two sweeps. First sweep takes into account clock status
     // Second basically just automatically takes the first that isn't currently referenced
     while n_iterated < self.clock.len() * 2 && victim.is_none() {
-      let mut element = &mut self.clock[self.clock_position];
+      let element = &mut self.clock[self.clock_position];
       if !element.clock_used && can_page_be_replaced(&element.page) {
         victim = Option::Some(element.page_id);
       }
