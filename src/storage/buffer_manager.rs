@@ -70,6 +70,7 @@ impl<B: BufferManager> BMArcUpgradeableReadGuard<B> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn unlock(self) -> BMArc<B> {
         self.bmarc
     }
@@ -107,6 +108,7 @@ impl<B: BufferManager> BMArcWriteGuard<B> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn unlock(self) -> BMArc<B> {
         self.bmarc
     }

@@ -21,6 +21,7 @@ pub struct BTreeSegment<B: BufferManager> {
     key_attributes: Vec<TupleValueType>
 }
 
+#[allow(dead_code)]
 impl<B: BufferManager> BTreeSegment<B> {
     pub fn new(bm: B, segment_id: SegmentId, key_attributes: Vec<TupleValueType>) -> Self {
         Self {
