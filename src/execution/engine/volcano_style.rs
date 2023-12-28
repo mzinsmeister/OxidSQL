@@ -2,7 +2,7 @@ use std::{cell::RefCell, rc::Rc, collections::HashMap, error::Error};
 
 use crate::{catalog::{TableDesc, SAMPLE_SIZE, Catalog}, access::{SlottedPageScan, SlottedPageSegment, tuple::Tuple, StatisticsCollectingSPHeapStorage, HeapStorage}, types::{TupleValueType, TupleValue}, execution::plan::{self, PhysicalQueryPlanOperator, PhysicalQueryPlan, TupleWriter}, storage::buffer_manager::BufferManager};
 
-use super::{ExecutionEngine};
+use super::ExecutionEngine;
 
 pub type Register = Rc<RefCell<Option<TupleValue>>>; // Only single threaded execution for now
 

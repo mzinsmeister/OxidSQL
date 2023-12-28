@@ -34,11 +34,11 @@ impl OxidSQLDatabase {
     }
 
     pub fn query<'a>(&self, query: &'a str) -> Result<(), Box<dyn std::error::Error + 'a>> {
-        let (rest_query, parse_tree) = parser::parse_query(query)?;
-        if rest_query.trim().len() > 0 {
-            return Err(format!("Query was not parsed fully. Trailing suffix: '{}'", rest_query).into());
+        let mut ast = parser::parse_query(query)?;
+        if ast.len() != 1 {
+            return Err("Only single statement queries are supported at the moment".into());
         }
-        let analyzed_query = self.analyzer.analyze(parse_tree)?;
+        let analyzed_query = self.analyzer.analyze(ast.pop().unwrap())?;
         let plan = self.planner.plan(analyzed_query)?;
         self.executor.execute(plan, self.buffer_manager.clone())?;
         Ok(())

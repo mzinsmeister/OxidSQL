@@ -101,7 +101,7 @@ pub struct SelectQuery {
     pub join_predicates: Vec<(BoundAttribute, BoundAttribute)>,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SelectionOperator {
     Eq,
     LessThan,
@@ -110,10 +110,22 @@ pub enum SelectionOperator {
     GreaterThanOrEq
 }
 
+impl SelectionOperator {
+    pub fn invert(&self) -> Self {
+        match self {
+            SelectionOperator::Eq => SelectionOperator::Eq,
+            SelectionOperator::LessThan => SelectionOperator::GreaterThan,
+            SelectionOperator::LessThanOrEq => SelectionOperator::GreaterThanOrEq,
+            SelectionOperator::GreaterThan => SelectionOperator::LessThan,
+            SelectionOperator::GreaterThanOrEq => SelectionOperator::LessThanOrEq
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Selection {
     pub attribute: BoundAttribute,
-    pub value: TupleValue,
+    pub value: Option<TupleValue>,
     pub operator: SelectionOperator
 }
 

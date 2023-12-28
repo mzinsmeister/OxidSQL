@@ -3,11 +3,11 @@
 // It will obviously not be as sophisticated as the one in HyPer/Umbra, but it will follow
 // roughly the same principles. It will use the DPccp algorithm implemented in the optimizer module.
 
-use std::{collections::BTreeMap};
+use std::collections::BTreeMap;
 
 use atomic::Ordering;
 
-use crate::{execution::{plan::{PhysicalQueryPlan, self, PhysicalQueryPlanOperator, StdOutTupleWriter}}, optimizer::{query_graph::QueryGraph, optimizer::{run_dp_ccp, OptimizerResult}}, types::{TupleValue, TupleValueType}, planner::BoundTableRef, catalog::{Catalog, AttributeDesc, SAMPLE_SIZE}, storage::buffer_manager::BufferManager, access::{SlottedPageHeapStorage, SlottedPageSegment, HeapStorage}};
+use crate::{execution::plan::{PhysicalQueryPlan, self, PhysicalQueryPlanOperator, StdOutTupleWriter}, optimizer::{query_graph::QueryGraph, optimizer::{run_dp_ccp, OptimizerResult}}, types::{TupleValue, TupleValueType}, planner::BoundTableRef, catalog::{Catalog, AttributeDesc, SAMPLE_SIZE}, storage::buffer_manager::BufferManager, access::{SlottedPageHeapStorage, SlottedPageSegment, HeapStorage}};
 
 use super::{Planner, Query, PlannerError, BoundAttribute, SelectionOperator, SelectQuery, InsertQuery, CreateTableQuery};
 
@@ -113,7 +113,7 @@ impl<B: BufferManager> BottomUpPlanner<B> {
         for selection in &query.selections {
             relation_predicates.entry(selection.attribute.get_table_ref())
                 .or_insert_with(Vec::new)
-                .push((selection.attribute.attribute.id, Some(selection.value.clone()), selection.operator));
+                .push((selection.attribute.attribute.id, selection.value.clone(), selection.operator));
         }
         let mut relation_cardinalities = BTreeMap::new();
         for (relation_id, relation) in &query.from {
@@ -592,7 +592,7 @@ mod test {
                     nullable: false,
                 },
                 binding: None
-            }, operator: SelectionOperator::LessThan, value: TupleValue::Int(5)}],
+            }, operator: SelectionOperator::LessThan, value: Some(TupleValue::Int(5))}],
             join_predicates: Vec::new(),
         };
         

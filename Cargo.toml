@@ -12,7 +12,6 @@ itertools = "0.10.5"
 rand = "0.8.5"
 libc = "0.2.139"
 parking_lot = { version = "0.12.1", features = ["arc_lock"] }
-nom = "^7"
 rustyline = "11.0.0"
 zerocopy = { version = "0.7.32", features = ["alloc", "derive", "simd"] }
 ahash = "0.8.3"
@@ -20,7 +19,7 @@ atomic = "0.5.3"
 bitvec = "1.0.1"
 aes = "0.8.2"
 hex = "0.4.3"
-sqlparser = "0.35.0"
+sqlparser = { version = "0.35.0", features = ["std", "bigdecimal"] }
 
 [dev-dependencies]
 tempfile = "3"

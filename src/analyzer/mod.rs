@@ -1,8 +1,11 @@
 use std::{fmt::{Display, Debug}, error::Error};
 
-use itertools::{Itertools};
+use itertools::Itertools;
+use sqlparser::ast::{Statement, SetExpr, Select, TableFactor, SelectItem, Expr, BinaryOperator};
 
-use crate::{storage::buffer_manager::BufferManager, catalog::{Catalog, TableDesc, AttributeDesc}, planner::{Query, BoundTable, BoundAttribute, Selection, SelectionOperator, SelectQuery, InsertQuery, CreateTableQuery}, parser::{ParseTree, SelectParseTree, ParseWhereClause, ParseWhereClauseItem, BoundParseAttribute, InsertParseTree, CreateTableParseTree, TableDefinitionItem}, types::{TupleValueConversionError}, access::tuple::Tuple};
+use crate::{storage::buffer_manager::BufferManager, catalog::{Catalog, TableDesc, AttributeDesc}, planner::{Query, BoundTable, BoundAttribute, Selection, SelectionOperator, SelectQuery, InsertQuery, CreateTableQuery}, types::{TupleValueConversionError, TupleValue, TupleValueType}, access::tuple::Tuple};
+
+type ParseQuery = sqlparser::ast::Query;
 
 #[derive(Debug)]
 pub enum AnalyzerError<B: BufferManager> {
@@ -30,6 +33,30 @@ pub struct Analyzer<B: BufferManager> {
     catalog: Catalog<B>
 }
 
+struct InsertParseResult {
+    table_name: String,
+    values: Vec<Option<TupleValue>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTableParseTree {
+    pub name: String,
+    pub table_definition: Vec<TableDefinitionItem>
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTableColumn {
+    name: String,
+    column_type: TupleValueType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TableDefinitionItem {
+    PrimaryKeyDefinition(Vec<String>),
+    ColumnDefinition{ definition: CreateTableColumn, is_primary_key: bool }
+}
+
+
 impl<B: BufferManager> Analyzer<B> {
     pub fn new(catalog: Catalog<B>) -> Self {
         Analyzer {
@@ -37,22 +64,278 @@ impl<B: BufferManager> Analyzer<B> {
         }
     }
 
-    pub fn analyze(&self, parse_tree: ParseTree) -> Result<Query, AnalyzerError<B>> {
+    pub fn analyze(&self, parse_tree: Statement) -> Result<Query, AnalyzerError<B>> {
+        // TODO: This function isn't really nice with the sqlparser crate
+        //       It's huge and will only get bigger. Maybe we should have a
+        //       preprocessing step that converts the sqlparser AST into a
+        //       custom AST. This would however lose some of the benefits
+        //       of using the sqlparser crate in the first place.
         match parse_tree {
-            ParseTree::Select(select_tree) => self.analyze_select(select_tree),
-            ParseTree::Insert(insert_tree) => self.analyze_insert(insert_tree),
-            ParseTree::CreateTable(create_table_tree) => self.analyze_create_table(create_table_tree),
+            Statement::Query(query) => {
+                if query.with.is_some() {
+                    return Err(AnalyzerError::UnimplementedError("With clause unimplemented".to_string()));
+                }
+                if query.order_by.len() > 0 {
+                    return Err(AnalyzerError::UnimplementedError("Order by clause unimplemented".to_string()));
+                }
+                if query.limit.is_some() {
+                    return Err(AnalyzerError::UnimplementedError("Limit clause unimplemented".to_string()));
+                }
+                if query.offset.is_some() {
+                    return Err(AnalyzerError::UnimplementedError("Offset clause unimplemented".to_string()));
+                }
+                if query.fetch.is_some() {
+                    return Err(AnalyzerError::UnimplementedError("Fetch clause unimplemented".to_string()));
+                }
+                if query.locks.len() > 0 {
+                    return Err(AnalyzerError::UnimplementedError("Locks unimplemented".to_string()));
+                }
+                if let SetExpr::Select(select) = query.body.as_ref() {
+                    self.analyze_query(select.as_ref())
+                } else {
+                    Err(AnalyzerError::UnimplementedError("Only simple select queries are supported".to_string()))
+                }
+            },
+            Statement::Insert { 
+                table_name, 
+                columns, 
+                source, 
+                on, 
+                returning, .. } => {
+                    if on.is_some() {
+                        return Err(AnalyzerError::UnimplementedError("Insert with on clause unimplemented".to_string()));
+                    }
+                    if returning.is_some() {
+                        return Err(AnalyzerError::UnimplementedError("Insert with returning clause unimplemented".to_string()));
+                    }
+                    if table_name.0.len() != 1 {
+                        return Err(AnalyzerError::UnimplementedError("Insert with qualified table name unimplemented".to_string()));
+                    }
+                    if columns.len() > 0 {
+                        return Err(AnalyzerError::UnimplementedError("Insert with column list unimplemented".to_string()));
+                    }
+                    // TODO: Handle sources other than "VALUES"
+                    let table_name = table_name.0[0].value.clone();
+                    let values = Self::query_extract_values(&source)?;
+                    let insert = InsertParseResult { table_name, values };
+                    self.analyze_insert(insert)
+            },
+            Statement::CreateTable { 
+                name, 
+                columns, 
+                constraints, 
+                or_replace, 
+                temporary, 
+                external, 
+                global, 
+                if_not_exists, 
+                transient, 
+                table_properties, 
+                with_options, 
+                file_format, 
+                location, 
+                query, 
+                without_rowid, 
+                like, 
+                clone, 
+                engine, 
+                default_charset, 
+                collation, 
+                on_commit, 
+                on_cluster,
+                order_by, 
+                strict, .. } => {
+                    if or_replace {
+                        return Err(AnalyzerError::UnimplementedError("Create table with or replace unimplemented".to_string()));
+                    }
+                    if temporary {
+                        return Err(AnalyzerError::UnimplementedError("Create table with temporary unimplemented".to_string()));
+                    }
+                    if external {
+                        return Err(AnalyzerError::UnimplementedError("Create table with external unimplemented".to_string()));
+                    }
+                    if global.is_some() {
+                        return Err(AnalyzerError::UnimplementedError("Create table with global unimplemented".to_string()));
+                    }
+                    if if_not_exists {
+                        return Err(AnalyzerError::UnimplementedError("Create table with if not exists unimplemented".to_string()));
+                    }
+                    if transient {
+                        return Err(AnalyzerError::UnimplementedError("Create table with transient unimplemented".to_string()));
+                    }
+                    if table_properties.len() > 0 {
+                        return Err(AnalyzerError::UnimplementedError("Create table with table properties unimplemented".to_string()));
+                    }
+                    if with_options.len() > 0 {
+                        return Err(AnalyzerError::UnimplementedError("Create table with with options unimplemented".to_string()));
+                    }
+                    if file_format.is_some() {
+                        return Err(AnalyzerError::UnimplementedError("Create table with file format unimplemented".to_string()));
+                    }
+                    if location.is_some() {
+                        return Err(AnalyzerError::UnimplementedError("Create table with location unimplemented".to_string()));
+                    }
+                    if query.is_some() {
+                        return Err(AnalyzerError::UnimplementedError("Create table with query unimplemented".to_string()));
+                    }
+                    if without_rowid {
+                        return Err(AnalyzerError::UnimplementedError("Create table with without rowid unimplemented".to_string()));
+                    }
+                    if like.is_some() {
+                        return Err(AnalyzerError::UnimplementedError("Create table with like unimplemented".to_string()));
+                    }
+                    if clone.is_some() {
+                        return Err(AnalyzerError::UnimplementedError("Create table with clone unimplemented".to_string()));
+                    }
+                    if engine.is_some() {
+                        return Err(AnalyzerError::UnimplementedError("Create table with engine unimplemented".to_string()));
+                    }
+                    if default_charset.is_some() {
+                        return Err(AnalyzerError::UnimplementedError("Create table with default charset unimplemented".to_string()));
+                    }
+                    if collation.is_some() {
+                        return Err(AnalyzerError::UnimplementedError("Create table with collation unimplemented".to_string()));
+                    }
+                    if on_commit.is_some() {
+                        return Err(AnalyzerError::UnimplementedError("Create table with on commit unimplemented".to_string()));
+                    }
+                    if on_cluster.is_some() {
+                        return Err(AnalyzerError::UnimplementedError("Create table with on cluster unimplemented".to_string()));
+                    }
+                    if order_by.is_some() {
+                        return Err(AnalyzerError::UnimplementedError("Create table with order by unimplemented".to_string()));
+                    }
+                    if strict {
+                        return Err(AnalyzerError::UnimplementedError("Create table with strict unimplemented".to_string()));
+                    }
+                    let name = if name.0.len() == 1 {
+                        name.0[0].value.clone()
+                    } else {
+                        return Err(AnalyzerError::UnimplementedError("Create table with qualified name unimplemented".to_string()));
+                    };
+
+                    let mut table_definition = Vec::new();
+
+                    for column in columns {
+                        let name = column.name.value;
+                        let column_type = match column.data_type {
+                            sqlparser::ast::DataType::SmallInt(_) => TupleValueType::SmallInt,
+                            sqlparser::ast::DataType::Int(_) => TupleValueType::Int,
+                            sqlparser::ast::DataType::BigInt(_) => TupleValueType::BigInt,
+                            // TODO: Handle length octets and characters properly
+                            sqlparser::ast::DataType::Varchar(l) => TupleValueType::VarChar(l.map(|l| l.length as u16).unwrap_or(u16::MAX)),
+                            sqlparser::ast::DataType::Text => TupleValueType::VarChar(u16::MAX),
+                            // TODO: Handle more aliases (like Int64 for BigInt)
+                            _ => return Err(AnalyzerError::UnimplementedError("Only smallint, int, bigint, varchar and text are supported as column types".to_string()))
+                        };
+                        let primary_key = column.options.iter().any(|c| {
+                            if let sqlparser::ast::ColumnOption::Unique{ is_primary } = c.option {
+                                is_primary
+                            } else {
+                                false
+                            }
+                        });
+                        table_definition.push(TableDefinitionItem::ColumnDefinition { definition: CreateTableColumn { name, column_type }, is_primary_key: primary_key });
+                    }
+                    for constraint in constraints {
+                        match constraint {
+                            sqlparser::ast::TableConstraint::Unique { columns, is_primary, .. } => {
+                                if is_primary {
+                                    table_definition.push(TableDefinitionItem::PrimaryKeyDefinition(columns.iter().map(|c| c.value.clone()).collect()));
+                                }
+                            },
+                            _ => return Err(AnalyzerError::UnimplementedError("Only primary key constraints are supported".to_string()))
+                        }
+                    }
+                    let create_table_tree = CreateTableParseTree {
+                        name,
+                        table_definition,
+                    };
+
+                    self.analyze_create_table(create_table_tree)
+                }
+            _ => Err(AnalyzerError::UnimplementedError("Only SELECT, INSERT and CREATE TABLE statements are supported".to_string()))
         }
     }
 
-    fn analyze_select(&self, select_tree: SelectParseTree) -> Result<Query, AnalyzerError<B>> {
+
+    fn convert_to_tuple_value(v: &sqlparser::ast::Value) -> Result<Option<TupleValue>, AnalyzerError<B>> {
+        match v {
+            sqlparser::ast::Value::Number(n, _) => {
+                if n.is_integer() {
+                    let (int, exponent) = n.as_bigint_and_exponent();
+                    if exponent < 0 {
+                        return Err(AnalyzerError::UnimplementedError("Only integer numbers up to 64 bits are supported".to_string()));
+                    }
+                    assert_eq!(exponent, 0);
+                    Ok(Some(TupleValue::BigInt(int.try_into().unwrap())))
+                } else {
+                    Err(AnalyzerError::UnimplementedError("Only integer numbers are supported".to_string()))
+                }
+            }
+            sqlparser::ast::Value::SingleQuotedString(s) => Ok(Some(TupleValue::String(s.clone()))),
+            sqlparser::ast::Value::Null => Ok(None),
+            _ => Err(AnalyzerError::UnimplementedError("Only integer numbers and strings (+ NULL) are supported".to_string()))
+        }
+    }
+
+    fn query_extract_values(query: &ParseQuery) -> Result<Vec<Option<TupleValue>>, AnalyzerError<B>> {
+        match query.body.as_ref() {
+            SetExpr::Values(values) => {
+                let rows = &values.rows;
+                if rows.len() != 1 {
+                    return Err(AnalyzerError::UnimplementedError("Only single row inserts are supported".to_string()));
+                }
+                let row = &rows[0];
+                let mut tuple = Vec::with_capacity(row.len());
+                for value in row {
+                    match value {
+                        sqlparser::ast::Expr::Value(v) => {
+                            tuple.push(Self::convert_to_tuple_value(v)?);
+                        },
+                        _ => return Err(AnalyzerError::UnimplementedError("Only values are supported as source for insert queries".to_string()))
+                    }
+                }
+                Ok(tuple)
+            },
+            _ => Err(AnalyzerError::UnimplementedError("Only values are supported as source for insert queries".to_string()))
+        }
+    }
+
+    fn analyze_query(&self, select_tree: &Select) -> Result<Query, AnalyzerError<B>> {
+        // Check whether the query contains any of the things we don't support (yet)
+        if select_tree.distinct.is_some() {
+            return Err(AnalyzerError::UnimplementedError("Distinct unimplemented".to_string()));
+        }
+        if select_tree.group_by.len() > 0 {
+            return Err(AnalyzerError::UnimplementedError("Group by unimplemented".to_string()));
+        }
+        if select_tree.having.is_some() {
+            return Err(AnalyzerError::UnimplementedError("Having unimplemented".to_string()));
+        }
+        if select_tree.into.is_some() {
+            return Err(AnalyzerError::UnimplementedError("Into unimplemented".to_string()));
+        }
+        if select_tree.named_window.len() > 0 {
+            return Err(AnalyzerError::UnimplementedError("Named window unimplemented".to_string()));
+        }
+
         let mut tables: Vec<BoundTable> = Vec::new();
-        for parse_table in select_tree.from_tables {
-            let found_table = self.catalog.find_table_by_name(&parse_table.name);
+        for parse_table in &select_tree.from {
+            let (binding, name) = if let TableFactor::Table{ name, alias, .. }  = &parse_table.relation {
+                if name.0.len() != 1 {
+                    return Err(AnalyzerError::UnimplementedError("Only simple table names are supported in FROM".to_string()));
+                }
+                let name = name.0[0].value.clone();
+                let binding = alias.clone().map(|a| a.name.to_string());
+                (binding, name)
+            } else {
+                return Err(AnalyzerError::UnimplementedError("Only simple table names are supported in FROM".to_string()));
+            };
+            let found_table = self.catalog.find_table_by_name(&name);
             match found_table {
                 Ok(table) => match table {
                     Some(table) => {
-                        let binding = parse_table.binding.map(|s| s.to_string());
                         tables.push(BoundTable::new(table, binding));
                     },
                     None => return Err(AnalyzerError::RelationNotFoundError(format!("{}", parse_table)))
@@ -61,19 +344,40 @@ impl<B: BufferManager> Analyzer<B> {
             }
         }
         let mut select = Vec::new();
-        if let Some(parse_attributes) = select_tree.columns {
-            for parse_attribute in parse_attributes {
-                select.push(Self::find_bound_attribute(&parse_attribute, &tables)?);
-            }
-        } else {
+        let wildcard = if select_tree.projection.len() == 1 {
+                if let SelectItem::Wildcard(_) = select_tree.projection[0] { true } else { false }
+            } else { false };
+        if wildcard {
             for table in &tables {
                 for attribute in &table.table.attributes {
                     select.push(BoundAttribute { attribute: attribute.clone(), binding: table.binding.clone() });
                 }
             }
+        } else {
+            for attribute in &select_tree.projection {
+                match attribute {
+                    SelectItem::UnnamedExpr(e) => {
+                        match e {
+                            Expr::Identifier(i) => {
+                                let attribute = Self::find_bound_attribute(&i.value, None, &tables)?;
+                                select.push(attribute);
+                            },
+                            Expr::CompoundIdentifier(i) => {
+                                if i.len() != 2 {
+                                    return Err(AnalyzerError::UnimplementedError("Only simple identifiers or compound identifiers with two parts are supported in SELECT".to_string()));
+                                }
+                                let attribute = Self::find_bound_attribute(&i[1].value, Some(&i[0].value), &tables)?;
+                                select.push(attribute);
+                            },
+                            _ => return Err(AnalyzerError::UnimplementedError("Only simple identifiers are supported in SELECT".to_string()))
+                        }
+                    },
+                    _ => return Err(AnalyzerError::UnimplementedError("Only simple identifiers are supported in SELECT".to_string()))
+                }
+            }
         }
-        let (selections, join_predicates) = if let Some(where_clause) = select_tree.where_clause {
-            Self::analyze_where(&where_clause, &tables)?
+        let (selections, join_predicates) = if let Some(where_clause) = &select_tree.selection {
+            Self::analyze_where(where_clause, &tables)?
         } else {
             (vec![], vec![])
         };
@@ -95,7 +399,7 @@ impl<B: BufferManager> Analyzer<B> {
 
     // The signature of that function is just temporary since as long as we only allow equals predicates
     // It's enough to store what should be equal to what
-    fn analyze_where(where_clause: &ParseWhereClause, from_tables: &[BoundTable]) -> Result<(Vec<Selection>, Vec<(BoundAttribute, BoundAttribute)>), AnalyzerError<B>> {
+    fn analyze_where(where_clause: &Expr, from_tables: &[BoundTable]) -> Result<(Vec<Selection>, Vec<(BoundAttribute, BoundAttribute)>), AnalyzerError<B>> {
         let mut selections = Vec::new();
         let mut join_predicates = Vec::new();
 
@@ -104,89 +408,176 @@ impl<B: BufferManager> Analyzer<B> {
         Ok((selections, join_predicates))
     }
 
-    fn analyze_where_rec(where_clause: &ParseWhereClause, 
+    fn convert_binary_operator(op: &BinaryOperator) -> Result<SelectionOperator, AnalyzerError<B>> {
+        match op {
+            BinaryOperator::Eq => Ok(SelectionOperator::Eq),
+            BinaryOperator::Lt => Ok(SelectionOperator::LessThan),
+            BinaryOperator::Gt => Ok(SelectionOperator::GreaterThan),
+            BinaryOperator::LtEq => Ok(SelectionOperator::LessThanOrEq),
+            BinaryOperator::GtEq => Ok(SelectionOperator::GreaterThanOrEq),
+            _ => Err(AnalyzerError::UnimplementedError("Only basic comparisons (=,<,>,>=,<=) and 'AND' are supported in WHERE".to_string()))
+        }
+    }
+
+    fn analyze_where_rec(where_clause: &Expr, 
                         selections: &mut Vec<Selection>, 
                         join_predicates: &mut Vec<(BoundAttribute, BoundAttribute)>, 
                         from_tables: &[BoundTable]) -> Result<(), AnalyzerError<B>> {
         match where_clause {
-            ParseWhereClause::Equals(l, r) => {
-                let (l, r) = match l {
-                    ParseWhereClauseItem::Name(n1) => match r {
-                        ParseWhereClauseItem::Name(n2) => {
-                            let left = Self::find_bound_attribute(n1, from_tables)?;
-                            let right = Self::find_bound_attribute(n2, from_tables)?;
-                            if !left.attribute.data_type.is_comparable_to(&right.attribute.data_type) {
-                                return Err(AnalyzerError::UncomparableDataTypes(format!("{} and {}", left.attribute.data_type, right.attribute.data_type)));
+            Expr::BinaryOp { left, op, right } => {
+                match op {
+                    // TODO: This is quite ugly
+                    BinaryOperator::Eq => {
+                        let (attribute, value) = match left.as_ref() {
+                            Expr::Identifier(i) => match right.as_ref() {
+                                Expr::Identifier(i2) => {
+                                    let left = Self::find_bound_attribute(&i.value, None, from_tables)?;
+                                    let right = Self::find_bound_attribute(&i2.value, None, from_tables)?;
+                                    if !left.attribute.data_type.is_comparable_to(&right.attribute.data_type) {
+                                        return Err(AnalyzerError::UncomparableDataTypes(format!("{} and {}", left.attribute.data_type, right.attribute.data_type)));
+                                    }
+                                    join_predicates.push((left, right));
+                                    return Ok(())
+                                },
+                                Expr::CompoundIdentifier(i2) => {
+                                    if i2.len() != 2 {
+                                        return Err(AnalyzerError::UnimplementedError("Only simple identifiers or compound identifiers with two parts are supported in WHERE".to_string()));
+                                    }
+                                    let left = Self::find_bound_attribute(&i.value, None, from_tables)?;
+                                    let right = Self::find_bound_attribute(&i2[1].value, Some(&i2[0].value), from_tables)?;
+                                    if !left.attribute.data_type.is_comparable_to(&right.attribute.data_type) {
+                                        return Err(AnalyzerError::UncomparableDataTypes(format!("{} and {}", left.attribute.data_type, right.attribute.data_type)));
+                                    }
+                                    join_predicates.push((left, right));
+                                    return Ok(())
+                                },
+                                Expr::Value(v) => {
+                                    (Self::find_bound_attribute(&i.value, None, from_tables)?, Self::convert_to_tuple_value(v)?)
+                                },
+                                _ => return Err(AnalyzerError::UnimplementedError("Non-equijoins unimplemented".to_string())),
+                            },
+                            Expr::CompoundIdentifier(i) => {
+                                if i.len() != 2 {
+                                    return Err(AnalyzerError::UnimplementedError("Only simple identifiers or compound identifiers with two parts are supported in WHERE".to_string()));
+                                }
+                                match right.as_ref() {
+                                    Expr::Identifier(i2) => {
+                                        let left = Self::find_bound_attribute(&i[1].value, Some(&i[0].value), from_tables)?;
+                                        let right = Self::find_bound_attribute(&i2.value, None, from_tables)?;
+                                        if !left.attribute.data_type.is_comparable_to(&right.attribute.data_type) {
+                                            return Err(AnalyzerError::UncomparableDataTypes(format!("{} and {}", left.attribute.data_type, right.attribute.data_type)));
+                                        }
+                                        join_predicates.push((left, right));
+                                        return Ok(())
+                                    },
+                                    Expr::CompoundIdentifier(i2) => {
+                                        if i2.len() != 2 {
+                                            return Err(AnalyzerError::UnimplementedError("Only simple identifiers or compound identifiers with two parts are supported in WHERE".to_string()));
+                                        }
+                                        let left = Self::find_bound_attribute(&i[1].value, Some(&i[0].value), from_tables)?;
+                                        let right = Self::find_bound_attribute(&i2[1].value, Some(&i2[0].value), from_tables)?;
+                                        if !left.attribute.data_type.is_comparable_to(&right.attribute.data_type) {
+                                            return Err(AnalyzerError::UncomparableDataTypes(format!("{} and {}", left.attribute.data_type, right.attribute.data_type)));
+                                        }
+                                        join_predicates.push((left, right));
+                                        return Ok(())
+                                    },
+                                    Expr::Value(v) => {
+                                        (Self::find_bound_attribute(&i[1].value, Some(&i[0].value), from_tables)?, Self::convert_to_tuple_value(v)?)
+                                    },
+                                    _ => return Err(AnalyzerError::UnimplementedError("Non-equijoins unimplemented".to_string())),
+                                }
+                            }                            
+                            Expr::Value(v) => match right.as_ref() {
+                                Expr::Identifier(i) => {
+                                    (Self::find_bound_attribute(&i.value, None, from_tables)?, Self::convert_to_tuple_value(v)?)
+                                },
+                                Expr::CompoundIdentifier(i) => {
+                                    if i.len() != 2 {
+                                        return Err(AnalyzerError::UnimplementedError("Only simple identifiers or compound identifiers with two parts are supported in WHERE".to_string()));
+                                    }
+                                    (Self::find_bound_attribute(&i[1].value, Some(&i[0].value), from_tables)?, Self::convert_to_tuple_value(v)?)
+                                },
+                                Expr::Value(_) => return Err(AnalyzerError::UnimplementedError("literal = literal comparisons currentlly unimplemented".to_string())),
+                                _ => return Err(AnalyzerError::UnimplementedError("Non-equijoins unimplemented".to_string())),
+                            },
+                            _ => return Err(AnalyzerError::UnimplementedError("Only identifier-value or identifier-identifier operations allowed in WHERE".to_string())),
+                        };
+                        if value.as_ref().map(|r| !attribute.attribute.data_type.is_comparable_to_value(&r)).unwrap_or(false) {
+                            return Err(AnalyzerError::UncomparableDataTypes(format!("{} and {}", attribute.attribute.data_type, value.unwrap())));
+                        }
+                        let selection = Selection {
+                            attribute,
+                            value,
+                            operator: SelectionOperator::Eq
+                        };
+                        selections.push(selection)
+                    },
+                    BinaryOperator::Lt | BinaryOperator::Gt | BinaryOperator::LtEq | BinaryOperator::GtEq => {
+                        let (attribute, value, operator) = match left.as_ref() {
+                            Expr::Identifier(i) => match right.as_ref() {
+                                Expr::Identifier(_) => {
+                                    return Err(AnalyzerError::UnimplementedError("Non-equijoins unimplemented".to_string()));
+                                },
+                                Expr::CompoundIdentifier(_) => {
+                                    return Err(AnalyzerError::UnimplementedError("Non-equijoins unimplemented".to_string()));
+                                },
+                                Expr::Value(v) => {
+                                    (Self::find_bound_attribute(&i.value, None, from_tables)?, Self::convert_to_tuple_value(v)?, Self::convert_binary_operator(op)?)
+                                },
+                                _ => return Err(AnalyzerError::UnimplementedError("Only identifier-value or identifier-identifier operations allowed in WHERE".to_string())),
+                            },
+                            Expr::CompoundIdentifier(i) => match right.as_ref() {
+                                Expr::Identifier(_) => {
+                                    return Err(AnalyzerError::UnimplementedError("Non-equijoins unimplemented".to_string()));
+                                },
+                                Expr::CompoundIdentifier(_) => {
+                                    return Err(AnalyzerError::UnimplementedError("Non-equijoins unimplemented".to_string()));
+                                },
+                                Expr::Value(v) => {
+                                    if i.len() != 2 {
+                                        return Err(AnalyzerError::UnimplementedError("Only simple identifiers or compound identifiers with two parts are supported in WHERE".to_string()));
+                                    }
+                                    (Self::find_bound_attribute(&i[1].value, Some(&i[0].value), from_tables)?, Self::convert_to_tuple_value(v)?, Self::convert_binary_operator(op)?)
+                                },
+                                _ => return Err(AnalyzerError::UnimplementedError("Only identifier-value or identifier-identifier operations allowed in WHERE".to_string())),
                             }
-                            join_predicates.push((left, right));
-                            return Ok(())
-                        },
-                        ParseWhereClauseItem::Value(v) => {
-                            (n1, v)
-                        },
+                            Expr::Value(v) => match right.as_ref() {
+                                Expr::Identifier(i) => {
+                                    (Self::find_bound_attribute(&i.value, None, from_tables)?, Self::convert_to_tuple_value(v)?, Self::convert_binary_operator(op)?.invert())
+                                },
+                                Expr::CompoundIdentifier(i) => {
+                                    if i.len() != 2 {
+                                        return Err(AnalyzerError::UnimplementedError("Only simple identifiers or compound identifiers with two parts are supported in WHERE".to_string()));
+                                    }
+                                    (Self::find_bound_attribute(&i[1].value, Some(&i[0].value), from_tables)?, Self::convert_to_tuple_value(v)?, Self::convert_binary_operator(op)?.invert())
+                                },
+                                Expr::Value(_) => return Err(AnalyzerError::UnimplementedError("literal = literal comparisons currentlly unimplemented".to_string())),
+                                _ => return Err(AnalyzerError::UnimplementedError("Only identifier-value or identifier-identifier operations allowed in WHERE".to_string())),
+                            },
+                            _ => return Err(AnalyzerError::UnimplementedError("Only identifier-value or identifier-identifier operations allowed in WHERE".to_string())),
+                        };
+                        let selection = Selection {
+                            attribute,
+                            value,
+                            operator
+                        };
+                        selections.push(selection)
                     },
-                    ParseWhereClauseItem::Value(v) => match r {
-                        ParseWhereClauseItem::Name(n) => {
-                            (n, v)
-                        },
-                        ParseWhereClauseItem::Value(_) => return Err(AnalyzerError::UnimplementedError("literal = literal comparisons currentlly unimplemented".to_string())),
+                    BinaryOperator::And => {
+                        Self::analyze_where_rec(left, selections, join_predicates, from_tables)?;
+                        Self::analyze_where_rec(right, selections, join_predicates, from_tables)?;
                     },
-                };
-                let attribute = Self::find_bound_attribute(l, from_tables)?;
-                if !attribute.attribute.data_type.is_comparable_to_value(r) {
-                    return Err(AnalyzerError::UncomparableDataTypes(format!("{} and {}", attribute.attribute.data_type, r)));
+                    _ => return Err(AnalyzerError::UnimplementedError("Only basic comparisons (=,<,>,>=,<=) and 'AND' are supported in WHERE".to_string()))
                 }
-                let selection = Selection {
-                    attribute: Self::find_bound_attribute(l, from_tables)?,
-                    value: r.clone(),
-                    operator: SelectionOperator::Eq
-                };
-                selections.push(selection)
             },
-            ParseWhereClause::NotEquals(_, _) => return Err(AnalyzerError::UnimplementedError("Not equals unimplemented".to_string())),
-            ParseWhereClause::LessThan(l, r) 
-            | ParseWhereClause::GreaterThan(r, l) 
-            | ParseWhereClause::LessOrEqualThan(l, r)
-            | ParseWhereClause::GreaterOrEqualThan(r, l)
-             => {
-                let (l, r) = match l {
-                    ParseWhereClauseItem::Name(n1) => match r {
-                        ParseWhereClauseItem::Name(_) => return Err(AnalyzerError::UnimplementedError("Non-equijoins unimplemented".to_string())),
-                        ParseWhereClauseItem::Value(v) => {
-                            (n1, v)
-                        },
-                    },
-                    ParseWhereClauseItem::Value(v) => match r {
-                        ParseWhereClauseItem::Name(n) => {
-                            (n, v)
-                        },
-                        ParseWhereClauseItem::Value(_) => return Err(AnalyzerError::UnimplementedError("literal = literal comparisons currentlly unimplemented".to_string())),
-                    },
-                };
-                let selection = Selection {
-                    attribute: Self::find_bound_attribute(l, from_tables)?,
-                    value: r.clone(),
-                    operator: match where_clause {
-                        ParseWhereClause::LessThan(_, _) => SelectionOperator::LessThan,
-                        ParseWhereClause::GreaterThan(_, _) => SelectionOperator::GreaterThan,
-                        ParseWhereClause::LessOrEqualThan(_, _) => SelectionOperator::LessThanOrEq,
-                        ParseWhereClause::GreaterOrEqualThan(_, _) => SelectionOperator::GreaterThanOrEq,
-                        _ => unreachable!()
-                    }
-                };
-                selections.push(selection)
-            },
-            ParseWhereClause::And(l, r) => {
-                Self::analyze_where_rec(l, selections, join_predicates, from_tables)?;
-                Self::analyze_where_rec(r, selections, join_predicates, from_tables)?;
-            }
-            ParseWhereClause::Or(_, _) => return Err(AnalyzerError::UnimplementedError("Or unimplemented".to_string())),
+            _ => return Err(AnalyzerError::UnimplementedError("Only basic comparisons (=,<,>,>=,<=) and 'AND' are supported in WHERE".to_string()))
         }
         Ok(())
     }
 
-    fn find_bound_attribute(parse_attribute: &BoundParseAttribute, tables: &[BoundTable]) -> Result<BoundAttribute, AnalyzerError<B>> {
-        let binding = parse_attribute.binding.map(|s| s.to_string());
+    fn find_bound_attribute(name: &str, binding: Option<&str>, tables: &[BoundTable]) -> Result<BoundAttribute, AnalyzerError<B>> {
+        let binding = binding.map(|s| s.to_string());
         if let Some(binding) = &binding {
             if !tables.iter().any(|t| t.binding == Some(binding.clone())) {
                 return Err(AnalyzerError::UnboundBinding(binding.clone()));
@@ -195,23 +586,23 @@ impl<B: BufferManager> Analyzer<B> {
         let attribute = {
             let found_attributes = tables.iter()
                 .filter(|t| t.binding == binding)
-                .filter_map(|t| t.table.get_attribute_by_name(parse_attribute.name))
+                .filter_map(|t| t.table.get_attribute_by_name(&name))
                 .exactly_one();
             match found_attributes {
                 Ok(attribute) => attribute,
                 Err(e) => match e.count() {
-                    0 => return Err(AnalyzerError::AttributeNotFoundError(parse_attribute.name.to_string())),
-                    _ => return Err(AnalyzerError::AmbiguousAttributeName(parse_attribute.name.to_string()))
+                    0 => return Err(AnalyzerError::AttributeNotFoundError(name.to_string())),
+                    _ => return Err(AnalyzerError::AmbiguousAttributeName(name.to_string()))
                 }
             }
         };
         Ok(BoundAttribute { attribute: attribute.clone(), binding: binding })
     }
 
-    fn analyze_insert(&self, insert_tree: InsertParseTree) -> Result<Query, AnalyzerError<B>> {
-        let table = match self.catalog.find_table_by_name(&insert_tree.table) {
+    fn analyze_insert(&self, insert_tree: InsertParseResult) -> Result<Query, AnalyzerError<B>> {
+        let table = match self.catalog.find_table_by_name(&insert_tree.table_name) {
             Ok(Some(table)) => table,
-            Ok(None) => return Err(AnalyzerError::RelationNotFoundError(insert_tree.table.to_string())),
+            Ok(None) => return Err(AnalyzerError::RelationNotFoundError(insert_tree.table_name.to_string())),
             Err(e) => return Err(AnalyzerError::BufferManagerError(e))
         };
         if insert_tree.values.len() < table.attributes.len() {
@@ -273,7 +664,9 @@ mod test {
 
     use std::sync::Arc;
 
-    use crate::{storage::{buffer_manager::mock::MockBufferManager, page::PAGE_SIZE}, catalog::{TableDesc, AttributeDesc}, types::{TupleValueType, TupleValue}, parser::{BoundParseTable, CreateTableColumn}, planner::BoundTableRef, config::DbConfig};
+    use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
+
+    use crate::{storage::{buffer_manager::mock::MockBufferManager, page::PAGE_SIZE}, catalog::{TableDesc, AttributeDesc}, types::TupleValueType, planner::BoundTableRef, config::DbConfig};
 
     use super::*;
 
@@ -317,21 +710,7 @@ mod test {
     fn test_analyze_select_no_where() {
         let catalog = get_catalog(MockBufferManager::new(PAGE_SIZE));
         let analyzer = Analyzer::new(catalog);
-        let parse_tree = ParseTree::Select(SelectParseTree {
-            columns: Some(vec![
-                BoundParseAttribute {
-                    name: "id",
-                    binding: None
-                },
-            ]),
-            from_tables: vec![
-                BoundParseTable {
-                    name: "people",
-                    binding: None
-                }
-            ],
-            where_clause: None
-        });
+        let parse_tree = Parser::parse_sql(&PostgreSqlDialect {}, "SELECT id FROM people").unwrap().pop().unwrap();
         let query = analyzer.analyze(parse_tree).unwrap();
         if let Query::Select(query) = query {
             assert_eq!(query.select.len(), 1);
@@ -351,17 +730,43 @@ mod test {
     }
 
     #[test]
+    fn test_analyze_select_with_table_qualifiers() {
+        let catalog = get_catalog(MockBufferManager::new(PAGE_SIZE));
+        let analyzer = Analyzer::new(catalog);
+        let parse_tree = Parser::parse_sql(&PostgreSqlDialect {}, "SELECT p.id FROM people p where p.age > 50").unwrap().pop().unwrap();
+        let query = analyzer.analyze(parse_tree).unwrap();
+        if let Query::Select(query) = query {
+            assert_eq!(query.select.len(), 1);
+            assert_eq!(query.select[0].attribute.name, "id");
+            assert_eq!(query.select[0].attribute.id, 1);
+            assert_eq!(query.select[0].attribute.table_ref, 1);
+            assert_eq!(query.select[0].binding, Some("p".to_string()));
+            assert_eq!(query.from.len(), 1);
+            assert_eq!(query.from[&BoundTableRef { table_ref: 1, binding: Some("p".to_string()) }].table.id, 1);
+            assert_eq!(query.from[&BoundTableRef { table_ref: 1, binding: Some("p".to_string()) }].table.name, "people");
+            assert_eq!(query.from[&BoundTableRef { table_ref: 1, binding: Some("p".to_string()) }].binding, Some("p".to_string()));
+            assert_eq!(query.join_predicates.len(), 0);
+            assert_eq!(query.selections.len(), 1);
+            assert_eq!(query.selections[0].attribute.attribute, AttributeDesc {
+                id: 3,
+                name: "age".to_string(),
+                data_type: TupleValueType::SmallInt,
+                nullable: true,
+                table_ref: 1
+            });
+            assert_eq!(query.selections[0].attribute.binding, Some("p".to_string()));
+            assert_eq!(query.selections[0].value, Some(TupleValue::BigInt(50)));
+            assert_eq!(query.selections[0].operator, SelectionOperator::GreaterThan);
+        } else {
+            panic!("Query is not a select query");
+        }
+    }
+
+    #[test]
     fn test_analyze_insert() {
         let catalog = get_catalog(MockBufferManager::new(PAGE_SIZE));
         let analyzer = Analyzer::new(catalog);
-        let parse_tree = ParseTree::Insert(InsertParseTree {
-            table: "people",
-            values: vec![
-                Some(TupleValue::BigInt(1)),
-                Some(TupleValue::String("John".to_string())),
-                Some(TupleValue::BigInt(42))
-            ]
-        });
+        let parse_tree = Parser::parse_sql(&PostgreSqlDialect {}, "INSERT INTO people VALUES (1, 'John', 42)").unwrap().pop().unwrap();
         let query = analyzer.analyze(parse_tree).unwrap();
         if let Query::Insert(query) = query {
             assert_eq!(query.table.id, 1);
@@ -380,13 +785,7 @@ mod test {
     fn test_analyze_insert_missing_values() {
         let catalog = get_catalog(MockBufferManager::new(PAGE_SIZE));
         let analyzer = Analyzer::new(catalog);
-        let parse_tree = ParseTree::Insert(InsertParseTree {
-            table: "people",
-            values: vec![
-                Some(TupleValue::BigInt(1)),
-                Some(TupleValue::String("John".to_string())),
-            ]
-        });
+        let parse_tree = Parser::parse_sql(&PostgreSqlDialect {}, "INSERT INTO people VALUES (1, 'John')").unwrap().pop().unwrap();
         let query = analyzer.analyze(parse_tree);
         assert!(query.is_err());
         if let Err(AnalyzerError::MissingValues(missing)) = query {
@@ -401,15 +800,7 @@ mod test {
     fn test_analyze_insert_too_many_values() {
         let catalog = get_catalog(MockBufferManager::new(PAGE_SIZE));
         let analyzer = Analyzer::new(catalog);
-        let parse_tree = ParseTree::Insert(InsertParseTree {
-            table: "people",
-            values: vec![
-                Some(TupleValue::BigInt(1)),
-                Some(TupleValue::String("John".to_string())),
-                Some(TupleValue::BigInt(42)),
-                Some(TupleValue::BigInt(42))
-            ]
-        });
+        let parse_tree = Parser::parse_sql(&PostgreSqlDialect {}, "INSERT INTO people VALUES (1, 'John', 42, 42)").unwrap().pop().unwrap();
         let query = analyzer.analyze(parse_tree);
         assert!(query.is_err());
         if let Err(AnalyzerError::TooManyValues{ expected, actual }) = query {
@@ -424,14 +815,7 @@ mod test {
     fn test_analyze_insert_wrong_type() {
         let catalog = get_catalog(MockBufferManager::new(PAGE_SIZE));
         let analyzer = Analyzer::new(catalog);
-        let parse_tree = ParseTree::Insert(InsertParseTree {
-            table: "people",
-            values: vec![
-                Some(TupleValue::BigInt(1)),
-                Some(TupleValue::BigInt(2)),
-                Some(TupleValue::BigInt(42)),
-            ]
-        });
+        let parse_tree = Parser::parse_sql(&PostgreSqlDialect {}, "INSERT INTO people VALUES (1, 2, 42)").unwrap().pop().unwrap();
         let query = analyzer.analyze(parse_tree);
         if let Err(AnalyzerError::DataTypeNotConvertible(index, conversion_error)) = query {
             assert_eq!(index, 1);
@@ -445,19 +829,7 @@ mod test {
     fn test_create_table() {
         let catalog = get_catalog(MockBufferManager::new(PAGE_SIZE));
         let analyzer = Analyzer::new(catalog);
-        let parse_tree = ParseTree::CreateTable(CreateTableParseTree {
-            name: "people",
-            table_definition: vec![
-                TableDefinitionItem::ColumnDefinition { definition: CreateTableColumn {
-                    name: "id",
-                    column_type: TupleValueType::Int,
-                }, is_primary_key: true },
-                TableDefinitionItem::ColumnDefinition { definition: CreateTableColumn {
-                    name: "name",
-                    column_type: TupleValueType::VarChar(255),
-                }, is_primary_key: false },
-            ]
-        });
+        let parse_tree = Parser::parse_sql(&PostgreSqlDialect {}, "CREATE TABLE people (id INT PRIMARY KEY, name VARCHAR(255))").unwrap().pop().unwrap();
         let query = analyzer.analyze(parse_tree).unwrap();
         if let Query::CreateTable(query) = query {
             assert_eq!(query.table.id, 1);
