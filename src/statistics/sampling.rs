@@ -41,7 +41,7 @@ use std::sync::atomic::Ordering::Relaxed;
 
 use atomic::Ordering;
 use byteorder::{ReadBytesExt, BigEndian, WriteBytesExt};
-use parking_lot::{RwLock, RwLockReadGuard, Mutex};
+use parking_lot::Mutex;
 
 // Quick and Hacky Atomic f32, u32 tuple
 pub struct AtomicU32F32Tup {
@@ -386,7 +386,11 @@ impl<'a, R: Fn() -> f32 + Clone> ListOfSkips<R> {
     /// Only call when there's no other thread accessing the list
     /// Otherwise we cannot possibly serialize the entire list since it might change
     /// while we're serializing it
-    /// We'll probably achieve this by using a RwLock over the entire 
+    /// This should probably only be called on orderly shutdown. For everything else we will just 
+    /// write the skip number that inserted a tuple to each tuple in the sample.
+    /// It should however be possible to reconstruct a pretty much equivalent skip list
+    /// by just initializing the sampler in a way that takes into account the total number of
+    /// tuples in the table.
     fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         let mut cursor = Cursor::new(&mut bytes);

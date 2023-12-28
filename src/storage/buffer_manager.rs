@@ -37,6 +37,7 @@ impl<B: BufferManager> BMArcReadGuard<B> {
         }
     }
 
+    #[allow(dead_code)]    
     pub fn unlock(self) -> BMArc<B> {
         self.bmarc
     }
@@ -92,6 +93,7 @@ impl<B: BufferManager> Deref for BMArcReadGuard<B> {
 
 pub struct BMArcWriteGuard<B: BufferManager> {
     // Don't change this order, it's important for the drop order
+    #[allow(dead_code)] // We need this for the destructor
     bmarc: BMArc<B>,
     page: ArcRwLockWriteGuard<RawRwLock, Page>,
 }
@@ -247,6 +249,7 @@ pub trait BufferManager: Debug + Sync + Send + Sized + Clone + 'static {
     fn fix_page<'a>(&'a self, page_id: PageId) -> Result<BMArc<Self>, Self::BError>;
     fn flush(&self) -> Result<(), Self::BError>;
     fn segment_size(&self, segment_id: SegmentId) -> usize;
+    fn allocate_page(&self, segment_id: SegmentId) -> PageId;
 }
 
 #[derive(Debug)]
@@ -461,6 +464,17 @@ impl<R: Replacer + Send + 'static, S: StorageManager + 'static> BufferManager fo
             self.disk_manager.get_relation_size(segment_id) as usize / PAGE_SIZE
         }
     }
+
+    /// Gets the first PageId that is guaranteed to be free and extends the segment size by one page
+    fn allocate_page(&self, segment_id: SegmentId) -> PageId {
+        let mut segment_sizes = self.segment_sizes.write();
+        if !segment_sizes.contains_key(&segment_id) {
+            segment_sizes.insert(segment_id, self.disk_manager.get_relation_size(segment_id) as usize / PAGE_SIZE);
+        }
+        let new_pid = PageId::new(segment_id, segment_sizes[&segment_id] as u64);
+        *(segment_sizes.get_mut(&segment_id).unwrap()) += 1;
+        return new_pid;
+    }
 }
 
 impl<R: Replacer + Send, S: StorageManager> Drop for HashTableBufferManager<R, S> {
@@ -540,6 +554,20 @@ pub mod mock {
             } else {
                 0
             }
+        }
+
+        fn allocate_page(&self, segment_id: SegmentId) -> PageId {
+            let mut segments = self.segments.lock();
+            if !segments.contains_key(&segment_id) {
+                segments.insert(segment_id, HashMap::new());
+            }
+            let new_pid = PageId::new(segment_id, segments[&segment_id].len() as u64);
+            let new_page = new_page(new_pid);
+            let mut new_page_guard = new_page.write();
+            new_page_guard.data = alligned_slice(self.page_size, 1);
+            drop(new_page_guard);
+            segments.get_mut(&segment_id).unwrap().insert(new_pid.offset_id, new_page);
+            new_pid
         }
     }
 }

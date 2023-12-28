@@ -257,6 +257,42 @@ impl Display for TupleValue {
     }
 }
 
+impl From::<i64> for TupleValue {
+    fn from(input: i64) -> Self {
+        TupleValue::BigInt(input)
+    }
+}
+
+impl From::<i32> for TupleValue {
+    fn from(input: i32) -> Self {
+        TupleValue::Int(input)
+    }
+}
+
+impl From::<i16> for TupleValue {
+    fn from(input: i16) -> Self {
+        TupleValue::SmallInt(input)
+    }
+}
+
+impl From::<String> for TupleValue {
+    fn from(input: String) -> Self {
+        TupleValue::String(input)
+    }
+}
+
+impl From::<&str> for TupleValue {
+    fn from(input: &str) -> Self {
+        TupleValue::String(input.to_string())
+    }
+}
+
+impl From::<Box<[u8]>> for TupleValue {
+    fn from(input: Box<[u8]>) -> Self {
+        TupleValue::ByteArray(input)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

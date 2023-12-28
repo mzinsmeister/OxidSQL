@@ -242,7 +242,6 @@ impl<B: BufferManager> SlottedPageSegment<B> {
                 if let Slot::Slot { offset, length } = slotted_root_page.get_slot(tid.slot_id) {
                     operation(slotted_root_page.get_record_mut(offset, length));
                     self.free_space_segment.update_page_size(tid.page_id, slotted_root_page.get_free_space())?;
-                    drop(slotted_root_page);
                     slotted_redirect_target_page.erase(redirect_tid.slot_id);
                     self.free_space_segment.update_page_size(redirect_tid.page_id, slotted_redirect_target_page.get_free_space())?;
                     return Ok(true);
@@ -253,7 +252,6 @@ impl<B: BufferManager> SlottedPageSegment<B> {
             let orig_relocate_result = slotted_redirect_target_page.relocate(redirect_tid.slot_id, size + 8);
             if orig_relocate_result {
                 if let Slot::RedirectTarget { offset, length } = slotted_redirect_target_page.get_slot(redirect_tid.slot_id) {
-                    drop(slotted_root_page);
                     operation(slotted_redirect_target_page.get_record_mut(offset + 8, length - 8));
                     self.free_space_segment.update_page_size(redirect_tid.page_id, slotted_redirect_target_page.get_free_space())?;
                     return Ok(true);
