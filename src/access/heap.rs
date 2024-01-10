@@ -9,9 +9,9 @@ use aes::cipher::generic_array::GenericArray;
 use bitvec::bitvec;
 use bitvec::vec::BitVec;
 
-use crate::catalog::AttributeStatistics;
 use crate::catalog::Catalog;
 use crate::catalog::TableDesc;
+use crate::catalog::statistics::AttributeStatistics;
 use crate::statistics::sampling::ReservoirSampler;
 use crate::storage::buffer_manager::BufferManager;
 use crate::types::RelationTID;
