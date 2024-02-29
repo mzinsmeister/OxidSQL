@@ -1,7 +1,7 @@
 # OxidSQL (Toy) SQL Database in Rust
 
 <p align="center">
-    <img src="logo/logo.png" alt="OxidSQL (Toy) SQL Database in Rust" width=200></img>
+    <img src="logo/oxidsql-logo.svg" alt="" width=350></img>
 </p>
 
 I'm interested in databases and in Rust so i thought why not combine it and learn about 
