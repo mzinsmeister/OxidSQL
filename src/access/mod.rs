@@ -8,6 +8,7 @@ pub mod tuple;
 pub use self::btree_segment::*;
 pub use self::slotted_page_segment::*;
 pub use self::heap::*;
+pub use self::index::*;
 
 
 /*

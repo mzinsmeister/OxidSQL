@@ -13,6 +13,7 @@ impl DbObjectType {
     fn from_u16(value: u16) -> DbObjectType {
         match value {
             0 => DbObjectType::Relation,
+            1 => DbObjectType::Index,
             _ => unreachable!()
         }
     }
@@ -24,6 +25,9 @@ pub(super) struct DbObjectDesc {
     pub name: String,
     pub class_type: DbObjectType,
     pub segment_id: SegmentId,
+    // TODO: Maybe make this one "max_segment_id" so that we can move these 
+    //       table-object-specific fields to the type-specific JSON field.
+    //       Currently we need this to be able to find the max segment id on startup.
     pub fsi_segment_id: Option<SegmentId>,
     pub sample_segment_id: Option<SegmentId>,
     pub sample_fsi_segment_id: Option<SegmentId>,
@@ -53,17 +57,17 @@ impl From<&Tuple> for DbObjectDesc {
             None => None,
             _ => unreachable!()
         };
-        let sample_id = match value.values[5] {
+        let sample_segment_id = match value.values[5] {
             Some(TupleValue::Int(segment_id)) => Some(segment_id as u32),
             None => None,
             _ => unreachable!()
         };
-        let sample_fsi_id = match value.values[6] {
+        let sample_fsi_segment_id = match value.values[6] {
             Some(TupleValue::Int(segment_id)) => Some(segment_id as u32),
             None => None,
             _ => unreachable!()
         };
-        DbObjectDesc { id: id as u32, name, class_type, segment_id: segment_id, fsi_segment_id: fsi_segment_id, sample_segment_id: sample_id, sample_fsi_segment_id: sample_fsi_id }
+        DbObjectDesc { id: id as u32, name, class_type, segment_id, fsi_segment_id, sample_segment_id, sample_fsi_segment_id }
     }
 }
 
@@ -76,7 +80,7 @@ impl From<&DbObjectDesc> for Tuple {
             Some(TupleValue::Int(value.segment_id as i32)), // segment_id
             value.fsi_segment_id.map(|v| TupleValue::Int(v as i32)), // fsi_segment_id
             value.sample_segment_id.map(|v| TupleValue::Int(v as i32)), // sample_segment_id
-            value.sample_fsi_segment_id.map(|v| TupleValue::Int(v as i32)) // sample_fsi_segment_id
+            value.sample_fsi_segment_id.map(|v| TupleValue::Int(v as i32)), // sample_fsi_segment_id
         ])
     }
 }
@@ -134,8 +138,7 @@ impl<B: BufferManager> DbObjectCatalogSegment<B> {
         }
     }
 
-    #[allow(dead_code)]
-    fn get_db_object_by_id(&self, id: u32) -> Result<Option<DbObjectDesc>, B::BError> {
+    pub fn get_db_object_by_id(&self, id: u32) -> Result<Option<DbObjectDesc>, B::BError> {
         self.find_first_db_object(|db_object_desc| db_object_desc.id == id).map(|e| e.map(|(_, d)| d))
     }
 

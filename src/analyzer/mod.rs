@@ -1,9 +1,9 @@
 use std::{fmt::{Display, Debug}, error::Error};
 
 use itertools::Itertools;
-use sqlparser::ast::{Statement, SetExpr, Select, TableFactor, SelectItem, Expr, BinaryOperator};
+use sqlparser::ast::{Statement as AstStatement, SetExpr, Select, TableFactor, SelectItem, Expr, BinaryOperator};
 
-use crate::{storage::buffer_manager::BufferManager, catalog::{Catalog, TableDesc, AttributeDesc}, planner::{Query, BoundTable, BoundAttribute, Selection, SelectionOperator, SelectQuery, InsertQuery, CreateTableQuery}, types::{TupleValueConversionError, TupleValue, TupleValueType}, access::tuple::Tuple};
+use crate::{access::tuple::Tuple, catalog::{AttributeDesc, Catalog, IndexDesc, IndexType, TableDesc}, planner::{BoundAttribute, BoundTable, CreateIndexStatement, CreateTableStatement, InsertStatement, SelectQuery, Selection, SelectionOperator, Statement}, storage::buffer_manager::BufferManager, types::{TupleValue, TupleValueConversionError, TupleValueType}};
 
 type ParseQuery = sqlparser::ast::Query;
 
@@ -12,6 +12,7 @@ pub enum AnalyzerError<B: BufferManager> {
     BufferManagerError(B::BError),
     UnimplementedError(String),
     RelationNotFoundError(String),
+    NameAlreadyExistsError(String),
     AttributeNotFoundError(String),
     UnboundBinding(String),
     AmbiguousAttributeName(String),
@@ -56,6 +57,12 @@ pub enum TableDefinitionItem {
     ColumnDefinition{ definition: CreateTableColumn, is_primary_key: bool }
 }
 
+pub struct CreateIndexParseTree {
+    name: String,
+    table_name: String,
+    columns: Vec<String>,
+}
+
 
 impl<B: BufferManager> Analyzer<B> {
     pub fn new(catalog: Catalog<B>) -> Self {
@@ -64,14 +71,14 @@ impl<B: BufferManager> Analyzer<B> {
         }
     }
 
-    pub fn analyze(&self, parse_tree: Statement) -> Result<Query, AnalyzerError<B>> {
+    pub fn analyze(&self, parse_tree: AstStatement) -> Result<Statement, AnalyzerError<B>> {
         // TODO: This function isn't really nice with the sqlparser crate
         //       It's huge and will only get bigger. Maybe we should have a
         //       preprocessing step that converts the sqlparser AST into a
         //       custom AST. This would however lose some of the benefits
         //       of using the sqlparser crate in the first place.
         match parse_tree {
-            Statement::Query(query) => {
+            AstStatement::Query(query) => {
                 if query.with.is_some() {
                     return Err(AnalyzerError::UnimplementedError("With clause unimplemented".to_string()));
                 }
@@ -96,7 +103,7 @@ impl<B: BufferManager> Analyzer<B> {
                     Err(AnalyzerError::UnimplementedError("Only simple select queries are supported".to_string()))
                 }
             },
-            Statement::Insert { 
+            AstStatement::Insert { 
                 table_name, 
                 columns, 
                 source, 
@@ -120,7 +127,7 @@ impl<B: BufferManager> Analyzer<B> {
                     let insert = InsertParseResult { table_name, values };
                     self.analyze_insert(insert)
             },
-            Statement::CreateTable { 
+            AstStatement::CreateTable { 
                 name, 
                 columns, 
                 constraints, 
@@ -253,7 +260,45 @@ impl<B: BufferManager> Analyzer<B> {
                     };
 
                     self.analyze_create_table(create_table_tree)
+                },
+            AstStatement::CreateIndex { 
+                name, 
+                table_name,
+                columns,
+                unique,
+                if_not_exists,
+                using,
+            } => {
+                if unique {
+                    return Err(AnalyzerError::UnimplementedError("Create index with unique unimplemented".to_string()));
                 }
+                if if_not_exists {
+                    return Err(AnalyzerError::UnimplementedError("Create index with if not exists unimplemented".to_string()));
+                }
+                if using.is_some() {
+                    return Err(AnalyzerError::UnimplementedError("Create index with using unimplemented".to_string()));
+                }
+                let name = if name.0.len() == 1 {
+                    name.0[0].value.clone()
+                } else {
+                    return Err(AnalyzerError::UnimplementedError("Create index with qualified name unimplemented".to_string()));
+                };
+                let table_name = if table_name.0.len() == 1 {
+                    table_name.0[0].value.clone()
+                } else {
+                    return Err(AnalyzerError::UnimplementedError("Create index with qualified name unimplemented".to_string()));
+                };
+                let columns = columns.iter().map(|c| match &c.expr {
+                    sqlparser::ast::Expr::Identifier(i) => Ok(i.value.clone()),
+                    _ => Err(AnalyzerError::UnimplementedError("Only simple identifiers are supported in index columns".to_string()))
+                }).collect::<Result<Vec<String>, _>>()?;
+                let create_index_tree = CreateIndexParseTree {
+                    name,
+                    table_name,
+                    columns
+                };
+                self.analyze_create_index(create_index_tree)
+            },
             _ => Err(AnalyzerError::UnimplementedError("Only SELECT, INSERT and CREATE TABLE statements are supported".to_string()))
         }
     }
@@ -302,7 +347,7 @@ impl<B: BufferManager> Analyzer<B> {
         }
     }
 
-    fn analyze_query(&self, select_tree: &Select) -> Result<Query, AnalyzerError<B>> {
+    fn analyze_query(&self, select_tree: &Select) -> Result<Statement, AnalyzerError<B>> {
         // Check whether the query contains any of the things we don't support (yet)
         if select_tree.distinct.is_some() {
             return Err(AnalyzerError::UnimplementedError("Distinct unimplemented".to_string()));
@@ -389,7 +434,7 @@ impl<B: BufferManager> Analyzer<B> {
         //let (selections, join_predicates) = select_tree.where_clause.map_or((vec![], vec![]),|w| Self::analyze_where(&w)?);
 
 
-        return Ok(Query::Select(SelectQuery {
+        return Ok(Statement::Select(SelectQuery {
             select,
             from,
             join_predicates,
@@ -599,7 +644,7 @@ impl<B: BufferManager> Analyzer<B> {
         Ok(BoundAttribute { attribute: attribute.clone(), binding: binding })
     }
 
-    fn analyze_insert(&self, insert_tree: InsertParseResult) -> Result<Query, AnalyzerError<B>> {
+    fn analyze_insert(&self, insert_tree: InsertParseResult) -> Result<Statement, AnalyzerError<B>> {
         let table = match self.catalog.find_table_by_name(&insert_tree.table_name) {
             Ok(Some(table)) => table,
             Ok(None) => return Err(AnalyzerError::RelationNotFoundError(insert_tree.table_name.to_string())),
@@ -620,14 +665,17 @@ impl<B: BufferManager> Analyzer<B> {
             };
             tuple.values.push(typed_value);                
         }
-        Ok(Query::Insert(InsertQuery {
+        Ok(Statement::Insert(InsertStatement {
             table: table,
             values: vec![tuple]
         }))
 
     }
 
-    fn analyze_create_table(&self, create_table_tree: CreateTableParseTree) -> Result<Query, AnalyzerError<B>> {
+    fn analyze_create_table(&self, create_table_tree: CreateTableParseTree) -> Result<Statement, AnalyzerError<B>> {
+        if self.catalog.find_table_by_name(&create_table_tree.name).unwrap().is_some() {
+            return Err(AnalyzerError::NameAlreadyExistsError(create_table_tree.name.to_string()));
+        }
         let mut attributes = Vec::with_capacity(create_table_tree.table_definition.len());
         for attribute_definition in create_table_tree.table_definition.iter() {
             if let TableDefinitionItem::ColumnDefinition { definition, .. } = attribute_definition {
@@ -650,13 +698,44 @@ impl<B: BufferManager> Analyzer<B> {
                 data_type,
                 nullable: true,
                 table_ref: table_id
-            }).collect()
+            }).collect(),
+            indexes: vec![]
         };
-        Ok(Query::CreateTable(CreateTableQuery {
+        Ok(Statement::CreateTable(CreateTableStatement {
             table
         }))
     }
 
+    fn analyze_create_index(&self, create_index_tree: CreateIndexParseTree) -> Result<Statement, AnalyzerError<B>> {
+        if self.catalog.find_index_by_name(&create_index_tree.name).unwrap().is_some() {
+            return Err(AnalyzerError::NameAlreadyExistsError(create_index_tree.name.to_string()));
+        }
+        let table = match self.catalog.find_table_by_name(&create_index_tree.table_name) {
+            Ok(Some(table)) => table,
+            Ok(None) => return Err(AnalyzerError::RelationNotFoundError(create_index_tree.table_name.to_string())),
+            Err(e) => return Err(AnalyzerError::BufferManagerError(e))
+        };
+        let mut attributes = Vec::with_capacity(create_index_tree.columns.len());
+        for column in create_index_tree.columns.iter() {
+            let attribute = match table.get_attribute_by_name(&column) {
+                Some(attribute) => attribute,
+                None => return Err(AnalyzerError::AttributeNotFoundError(column.to_string()))
+            };
+            attributes.push(attribute);
+        }
+        let index_id = self.catalog.allocate_db_object_id();
+        let segment_id = self.catalog.allocate_segment_ids(1);
+        let index = IndexDesc {
+            id: index_id,
+            name: create_index_tree.name.to_string(),
+            index_type: IndexType::BTree,
+            indexed_id: table.id,
+            attributes: attributes.into_iter().map(|a| a.id).collect(),
+            segment_id,
+            fsi_segment_id: None
+        };
+        Ok(Statement::CreateIndex(CreateIndexStatement { index }))
+    }
 }
 
 #[cfg(test)]
@@ -702,6 +781,7 @@ mod test {
                         table_ref: 1
                     }
                 ],
+                indexes: vec![]
             }).unwrap();
             catalog
     }
@@ -712,7 +792,7 @@ mod test {
         let analyzer = Analyzer::new(catalog);
         let parse_tree = Parser::parse_sql(&PostgreSqlDialect {}, "SELECT id FROM people").unwrap().pop().unwrap();
         let query = analyzer.analyze(parse_tree).unwrap();
-        if let Query::Select(query) = query {
+        if let Statement::Select(query) = query {
             assert_eq!(query.select.len(), 1);
             assert_eq!(query.select[0].attribute.name, "id");
             assert_eq!(query.select[0].attribute.id, 1);
@@ -735,7 +815,7 @@ mod test {
         let analyzer = Analyzer::new(catalog);
         let parse_tree = Parser::parse_sql(&PostgreSqlDialect {}, "SELECT p.id FROM people p where p.age > 50").unwrap().pop().unwrap();
         let query = analyzer.analyze(parse_tree).unwrap();
-        if let Query::Select(query) = query {
+        if let Statement::Select(query) = query {
             assert_eq!(query.select.len(), 1);
             assert_eq!(query.select[0].attribute.name, "id");
             assert_eq!(query.select[0].attribute.id, 1);
@@ -768,7 +848,7 @@ mod test {
         let analyzer = Analyzer::new(catalog);
         let parse_tree = Parser::parse_sql(&PostgreSqlDialect {}, "INSERT INTO people VALUES (1, 'John', 42)").unwrap().pop().unwrap();
         let query = analyzer.analyze(parse_tree).unwrap();
-        if let Query::Insert(query) = query {
+        if let Statement::Insert(query) = query {
             assert_eq!(query.table.id, 1);
             assert_eq!(query.table.name, "people");
             assert_eq!(query.values.len(), 1);
@@ -829,11 +909,11 @@ mod test {
     fn test_create_table() {
         let catalog = get_catalog(MockBufferManager::new(PAGE_SIZE));
         let analyzer = Analyzer::new(catalog);
-        let parse_tree = Parser::parse_sql(&PostgreSqlDialect {}, "CREATE TABLE people (id INT PRIMARY KEY, name VARCHAR(255))").unwrap().pop().unwrap();
+        let parse_tree = Parser::parse_sql(&PostgreSqlDialect {}, "CREATE TABLE people1 (id INT PRIMARY KEY, name VARCHAR(255))").unwrap().pop().unwrap();
         let query = analyzer.analyze(parse_tree).unwrap();
-        if let Query::CreateTable(query) = query {
+        if let Statement::CreateTable(query) = query {
             assert_eq!(query.table.id, 1);
-            assert_eq!(query.table.name, "people");
+            assert_eq!(query.table.name, "people1");
             assert_eq!(query.table.attributes.len(), 2);
             assert_eq!(query.table.attributes[0].id, 1);
             assert_eq!(query.table.attributes[0].name, "id");
@@ -846,6 +926,37 @@ mod test {
             assert_eq!(query.table.attributes[1].nullable, true);
         } else {
             panic!("Query is not a create table query");
+        }
+    }
+
+    #[test]
+    fn test_create_already_existing_table() {
+        let catalog = get_catalog(MockBufferManager::new(PAGE_SIZE));
+        let analyzer = Analyzer::new(catalog);
+        let parse_tree = Parser::parse_sql(&PostgreSqlDialect {}, "CREATE TABLE people (id INT PRIMARY KEY, name VARCHAR(255))").unwrap().pop().unwrap();
+        let query = analyzer.analyze(parse_tree);
+        assert!(query.is_err());
+        if let Err(AnalyzerError::NameAlreadyExistsError(name)) = query {
+            assert_eq!(name, "people");
+        } else {
+            panic!("Analyzer didn't return the correct error");
+        }
+    }
+
+    #[test]
+    fn test_create_index() {
+        let catalog = get_catalog(MockBufferManager::new(PAGE_SIZE));
+        let analyzer = Analyzer::new(catalog);
+        let parse_tree = Parser::parse_sql(&PostgreSqlDialect {}, "CREATE INDEX idx_name ON people (name)").unwrap().pop().unwrap();
+        let query = analyzer.analyze(parse_tree).unwrap();
+        if let Statement::CreateIndex(query) = query {
+            assert_eq!(query.index.id, 1);
+            assert_eq!(query.index.name, "idx_name");
+            assert_eq!(query.index.indexed_id, 1);
+            assert_eq!(query.index.attributes.len(), 1);
+            assert_eq!(query.index.attributes[0], 2);
+        } else {
+            panic!("Query is not a create index query");
         }
     }
 }

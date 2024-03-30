@@ -1,6 +1,6 @@
-use std::{cell::RefCell, rc::Rc, collections::HashMap, error::Error};
+use std::{cell::RefCell, collections::HashMap, error::Error, rc::Rc};
 
-use crate::{catalog::{TableDesc, SAMPLE_SIZE, Catalog}, access::{SlottedPageScan, SlottedPageSegment, tuple::Tuple, StatisticsCollectingSPHeapStorage, HeapStorage}, types::{TupleValueType, TupleValue}, execution::plan::{self, PhysicalQueryPlanOperator, PhysicalQueryPlan, TupleWriter}, storage::buffer_manager::BufferManager};
+use crate::{access::{tuple::Tuple, BTreeSegment, HeapStorage, Index, SlottedPageScan, SlottedPageSegment, StatisticsCollectingSPHeapStorage}, catalog::{AttributeDesc, Catalog, IndexDesc, IndexType, TableDesc, SAMPLE_SIZE}, execution::plan::{self, PhysicalQueryPlan, PhysicalQueryPlanOperator, TupleWriter}, storage::buffer_manager::BufferManager, types::{TupleValue, TupleValueType}};
 
 use super::ExecutionEngine;
 
@@ -308,14 +308,16 @@ impl Operator for InlineTable {
 
 struct Insert<B: BufferManager> {
     child: Box<dyn Operator>,
-    storage: StatisticsCollectingSPHeapStorage<B>
+    storage: StatisticsCollectingSPHeapStorage<B>,
+    indexes: Vec<(Vec<usize>, Box<dyn Index<B>>)>
 }
 
 impl<B: BufferManager> Insert<B> {
-    fn new(child: Box<dyn Operator>, storage: StatisticsCollectingSPHeapStorage<B>) -> Self {
+    fn new(child: Box<dyn Operator>, storage: StatisticsCollectingSPHeapStorage<B>, indexes: Vec<(Vec<usize>, Box<dyn Index<B>>)>) -> Self {
         Insert {
             child,
-            storage
+            storage,
+            indexes
         }
     }
 }
@@ -327,7 +329,16 @@ impl<B: BufferManager> Operator for Insert<B> {
             for register in self.child.get_output() {
                 tuple.values.push(register.borrow().to_owned());
             }
-            self.storage.insert_tuples(&mut [tuple])?;
+            let tuples = [tuple];
+            let tid = self.storage.insert_tuples(&tuples)?[0];
+            // Insert into indexes 
+            for (attributes, index) in &self.indexes {
+                let mut key = Vec::with_capacity(attributes.len());
+                for i in attributes {
+                    key.push(tuples[0].values[*i].to_owned());
+                }
+                index.insert(&key, tid)?;
+            }
             Ok(true)
         } else {
             Ok(false)
@@ -356,6 +367,47 @@ impl<B: BufferManager> CreateTable<B> {
 impl<B: BufferManager> Operator for CreateTable<B> {
     fn next(&mut self) -> Result<bool, Box<dyn Error>> {
         self.catalog.create_table(&self.table)?;
+        Ok(false)
+    }
+
+    fn get_output(&self) -> &[Register] {
+        &[]
+    }
+}
+
+struct CreateIndex<B: BufferManager> {
+    catalog: Catalog<B>,
+    buffer_manager: B,
+    index: IndexDesc
+}
+
+impl<B: BufferManager> CreateIndex<B> {
+    pub fn new(catalog: Catalog<B>, buffer_manager: B, index: IndexDesc) -> Self {
+        CreateIndex {
+            catalog,
+            buffer_manager,
+            index
+        }
+    }
+}
+
+impl<B: BufferManager> Operator for CreateIndex<B> {
+    fn next(&mut self) -> Result<bool, Box<dyn Error>> {
+        // TODO: Make this somehow "generic" over different index types
+        let index_attributes_types = self.catalog.find_table_by_id(self.index.indexed_id).unwrap().unwrap()
+                .attributes.iter()
+                    .enumerate()
+                    .filter(|(i, a)| self.index.attributes.contains(&(*i as u32)))
+                    .map(|(_, a)| a.data_type)
+                    .collect::<Vec<_>>();
+        let index = match self.index.index_type {
+            IndexType::BTree => {
+                Box::new(BTreeSegment::new(self.buffer_manager.clone(), self.index.segment_id, index_attributes_types)) as Box<dyn Index<B>>
+            },
+        };
+        index.init()?;
+        self.catalog.create_index(&self.index)?;
+        // TODO: Insert previous tuples into index
         Ok(false)
     }
 
@@ -436,12 +488,23 @@ impl<B: BufferManager> Engine<B> {
             },
             PhysicalQueryPlanOperator::Insert { input, table } => {
                 let child = self.convert_physical_plan_to_volcano_plan(buffer_manager.clone(), *input)?;
+                let indexes = table.indexes.iter().map(|index| {
+                    let attributes: Vec<_> = table.attributes.iter().enumerate().filter(|(_, a)| index.attributes.contains(&a.id)).collect();
+                    let attributes_types = attributes.iter().map(|(_, a)| a.data_type).collect();
+                    let attributes_indexes = attributes.iter().map(|(a, _)| *a).collect();
+                    (attributes_indexes, match index.index_type {
+                        IndexType::BTree => {
+                            Box::new(BTreeSegment::new(buffer_manager.clone(), index.segment_id, attributes_types)) as Box<dyn Index<B>>
+                        },
+                    })
+                }).collect();
                 let storage = StatisticsCollectingSPHeapStorage::new(&table, buffer_manager, self.catalog.clone(), SAMPLE_SIZE as usize)?;
-                Box::new(Insert::new(child, storage))
+                Box::new(Insert::new(child, storage, indexes))
             },
-            PhysicalQueryPlanOperator::CreateTable { table } => {
-                Box::new(CreateTable::new(self.catalog.clone(), table))
-            },
+            PhysicalQueryPlanOperator::CreateTable { table } =>
+                Box::new(CreateTable::new(self.catalog.clone(), table)),
+            PhysicalQueryPlanOperator::CreateIndex { index } => 
+                Box::new(CreateIndex::new(self.catalog.clone(), buffer_manager, index)),
         })
     }
 }
@@ -527,6 +590,7 @@ mod test {
             fsi_segment_id: 1001,
             sample_segment_id: 1002,
             sample_fsi_segment_id: 1003,
+            indexes: vec![]
         }
     }
 
@@ -753,7 +817,8 @@ mod test {
             segment_id: 1000, 
             fsi_segment_id: 1001, 
             sample_segment_id: 1002,
-            sample_fsi_segment_id: 1003 
+            sample_fsi_segment_id: 1003,
+            indexes: vec![]
         }).unwrap();
         let engine = super::Engine::new(catalog);
         engine.execute(root_operator, buffer_manager.clone()).unwrap(); 

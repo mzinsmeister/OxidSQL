@@ -9,7 +9,7 @@ use atomic::Ordering;
 
 use crate::{execution::plan::{PhysicalQueryPlan, self, PhysicalQueryPlanOperator, StdOutTupleWriter}, optimizer::{query_graph::QueryGraph, optimizer::{run_dp_ccp, OptimizerResult}}, types::{TupleValue, TupleValueType}, planner::BoundTableRef, catalog::{Catalog, AttributeDesc, SAMPLE_SIZE}, storage::buffer_manager::BufferManager, access::{SlottedPageHeapStorage, SlottedPageSegment, HeapStorage}};
 
-use super::{Planner, Query, PlannerError, BoundAttribute, SelectionOperator, SelectQuery, InsertQuery, CreateTableQuery};
+use super::{BoundAttribute, CreateIndexStatement, CreateTableStatement, InsertStatement, Planner, PlannerError, SelectQuery, SelectionOperator, Statement};
 
 pub struct BottomUpPlanner<B: BufferManager> {
     buffer_manager: B,
@@ -167,7 +167,7 @@ impl<B: BufferManager> BottomUpPlanner<B> {
         Ok((relation_cardinalities, relation_predicates))
     }
 
-    fn plan_insert(&self, insert: InsertQuery) -> Result<PhysicalQueryPlan, PlannerError> {
+    fn plan_insert(&self, insert: InsertStatement) -> Result<PhysicalQueryPlan, PlannerError> {
         let root_operator = PhysicalQueryPlanOperator::Insert {
             table: insert.table,
             input: Box::new(PhysicalQueryPlanOperator::InlineTable {
@@ -177,20 +177,29 @@ impl<B: BufferManager> BottomUpPlanner<B> {
         Ok(PhysicalQueryPlan { root_operator, cost: 0.0 })
     }
 
-    fn plan_create_table(&self, create_table: CreateTableQuery) -> Result<PhysicalQueryPlan, PlannerError> {
+    fn plan_create_table(&self, create_table: CreateTableStatement) -> Result<PhysicalQueryPlan, PlannerError> {
         let root_operator = PhysicalQueryPlanOperator::CreateTable {
             table: create_table.table,
+        };
+        Ok(PhysicalQueryPlan { root_operator, cost: 0.0 })
+    }
+
+    fn plan_create_index(&self, create_index: CreateIndexStatement) -> Result<PhysicalQueryPlan, PlannerError> {
+        let root_operator = PhysicalQueryPlanOperator::CreateIndex {
+            index: create_index.index
         };
         Ok(PhysicalQueryPlan { root_operator, cost: 0.0 })
     }
 }
 
 impl<B: BufferManager> Planner for BottomUpPlanner<B> {
-    fn plan(&self, query: Query) -> Result<PhysicalQueryPlan, PlannerError> {
+    fn plan(&self, query: Statement) -> Result<PhysicalQueryPlan, PlannerError> {
         match query {
-            Query::Select(select) => self.plan_select(&select),
-            Query::Insert(insert) => self.plan_insert(insert),
-            Query::CreateTable(create_table) => self.plan_create_table(create_table),
+            Statement::Select(select) => self.plan_select(&select),
+            Statement::Insert(insert) => self.plan_insert(insert),
+            Statement::CreateTable(create_table) => self.plan_create_table(create_table),
+            Statement::CreateIndex(create_index) => self.plan_create_index(create_index),
+            _ => unimplemented!()
         }
     }
 }
@@ -229,9 +238,10 @@ mod test {
                     nullable: false,
                 },
             ],
+            indexes: vec![]
         };
 
-        let query = Query::Select(SelectQuery {
+        let query = Statement::Select(SelectQuery {
             select: vec![
                 BoundAttribute {
                     attribute: AttributeDesc {
@@ -303,6 +313,7 @@ mod test {
                     nullable: false,
                 },
             ],
+            indexes: vec![]
         };
 
         let table1 = TableDesc {
@@ -335,9 +346,10 @@ mod test {
                     nullable: true,
                 },
             ],
+            indexes: vec![]
         };
 
-        let query = Query::Select(SelectQuery {
+        let query = Statement::Select(SelectQuery {
             select: vec![
                 BoundAttribute {
                     attribute: AttributeDesc {
@@ -456,9 +468,10 @@ mod test {
                     nullable: false,
                 },
             ],
+            indexes: vec![]
         };
 
-        let query = Query::Insert(InsertQuery { table: table0.clone(), values: vec![Tuple::new(vec![Some(TupleValue::Int(1)), Some(TupleValue::String("test".to_string()))])]});
+        let query = Statement::Insert(InsertStatement { table: table0.clone(), values: vec![Tuple::new(vec![Some(TupleValue::Int(1)), Some(TupleValue::String("test".to_string()))])]});
         let mock_bm = MockBufferManager::new(PAGE_SIZE);
         let catalog = Catalog::new(mock_bm.clone(), Arc::new(DbConfig { n_threads: 4 })).unwrap();
         let planner = BottomUpPlanner { buffer_manager: mock_bm.clone(), catalog };
@@ -503,9 +516,10 @@ mod test {
                     nullable: false,
                 },
             ],
+            indexes: vec![]
         };
 
-        let query = Query::CreateTable(CreateTableQuery { table: table0.clone() });
+        let query = Statement::CreateTable(CreateTableStatement { table: table0.clone() });
         let mock_bm = MockBufferManager::new(PAGE_SIZE);
         let catalog = Catalog::new(mock_bm.clone(), Arc::new(DbConfig { n_threads: 4 })).unwrap();
         let planner = BottomUpPlanner { buffer_manager: mock_bm.clone(), catalog };
@@ -544,6 +558,7 @@ mod test {
                     nullable: false,
                 },
             ],
+            indexes: vec![]
         };
 
         let mock_bm = MockBufferManager::new(PAGE_SIZE);

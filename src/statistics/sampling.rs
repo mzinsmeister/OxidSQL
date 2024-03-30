@@ -2,6 +2,9 @@
 use std::collections::LinkedList;
 use std::fmt::{Debug, Formatter};
 use std::io::{Cursor, Write};
+
+// TODO: Rewrite this! (I wrote my masters thesis on this topic after i wrote this code)
+
 /*
     Essentially an implementation of this paper: "Concurrent Online Sampling for All, for Free" 
     (https://altan.birler.co/static/papers/2020DAMON_ConcurrentOnlineSampling.pdf)

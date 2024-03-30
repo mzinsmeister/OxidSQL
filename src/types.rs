@@ -116,7 +116,7 @@ pub enum TupleValue {
     BigInt(i64),
     Int(i32),
     SmallInt(i16),
-    String(String),
+    String(String), // TODO: "German-style" string storage?
     ByteArray(Box<[u8]>),
     // Float(f64),
     // Bool(bool),

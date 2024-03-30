@@ -20,6 +20,7 @@ bitvec = "1.0.1"
 aes = "0.8.2"
 hex = "0.4.3"
 sqlparser = { version = "0.35.0", features = ["std", "bigdecimal"] }
+serde = "1.0.197"
 
 [dev-dependencies]
 tempfile = "3"

@@ -5,6 +5,8 @@ use crate::{storage::buffer_manager::BufferManager, types::{RelationTID, TupleVa
 // A basic index doesn't need to support range scans (hash tables for example don't)
 // It will always be a unique index
 pub trait Index<B: BufferManager> {
+    // Initialize the index
+    fn init(&self) -> Result<(), B::BError>;
     fn lookup(&self, key: &[Option<TupleValue>]) -> Result<Option<RelationTID>, B::BError>;
     // The result is a bool indicating whether uniqueness was violated
     fn insert(&self, key: &[Option<TupleValue>], tid: RelationTID) -> Result<bool, B::BError>;

@@ -1,14 +1,15 @@
-pub mod statistics;
+mod statistics;
 mod db_object;
 mod attribute;
+mod index;
 
-use std::{sync::{Arc, atomic::{Ordering, AtomicU64, AtomicU32}}, collections::BTreeMap};
+use std::{collections::BTreeMap, sync::{atomic::{AtomicU32, AtomicU64, Ordering}, Arc}};
 
 use parking_lot::RwLock;
 
-use crate::{access::{SlottedPageSegment, tuple::Tuple, SlottedPageHeapStorage, HeapStorage}, storage::{buffer_manager::BufferManager, page::SegmentId}, types::{TupleValueType, TupleValue, RelationTID}, statistics::{counting_hyperloglog::{CountingHyperLogLog}, sampling::ReservoirSampler}, config::DbConfig};
+use crate::{access::tuple::Tuple, config::DbConfig, statistics::{counting_hyperloglog::CountingHyperLogLog, sampling::ReservoirSampler}, storage::{buffer_manager::BufferManager, page::SegmentId}, types::{RelationTID, TupleValue, TupleValueType}};
 
-use self::{statistics::{CombinedTableStatistics, AttributeStatisticsCatalogSegment}, db_object::{DbObjectCatalogSegment, DbObjectType, DbObjectDesc}};
+use self::{attribute::AttributeCatalogSegment, db_object::{DbObjectCatalogSegment, DbObjectDesc, DbObjectType}, index::{IndexCatalogSegment, IndexDetailsDesc}, statistics::{AttributeStatisticsCatalogSegment, TableStatisticsCatalogSegment}};
 
 type DbObjectRef = u32;
 type AttributeRef = u32;
@@ -40,6 +41,7 @@ const DB_OBJECT_CATALOG_SEGMENT_ID: SegmentId = 0;
 const ATTRIBUTE_CATALOG_SEGMENT_ID: SegmentId = 2;
 const ATTRIBUTE_STATISTICS_CATALOG_SEGMENT_ID: SegmentId = 4;
 const TABLE_STATISTICS_CATALOG_SEGMENT_ID: SegmentId = 6;
+const INDEX_CATALOG_SEGMENT_ID: SegmentId = 8;
 
 pub const SAMPLE_SIZE: u32 = 1024;
 
@@ -49,6 +51,7 @@ pub struct TableDesc {
     pub id: DbObjectRef,
     pub name: String,
     pub attributes: Vec<AttributeDesc>,
+    pub indexes: Vec<IndexDesc>,
     pub segment_id: SegmentId,
     pub fsi_segment_id: SegmentId,
     pub sample_segment_id: SegmentId,
@@ -71,13 +74,138 @@ impl TableDesc {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+
+#[repr(u16)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub enum IndexType {
+    BTree = 0,
+}
+
+impl IndexType {
+    fn from_u16(value: u16) -> IndexType {
+        match value {
+            0 => IndexType::BTree,
+            _ => unreachable!()
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct IndexDesc {
     pub id: DbObjectRef,
     pub name: String,
-    pub table_ref: DbObjectRef,
+    pub indexed_id: DbObjectRef,
+    pub index_type: IndexType,
     pub attributes: Vec<AttributeRef>,
     pub segment_id: SegmentId,
+    pub fsi_segment_id: Option<SegmentId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct AttributeDesc {
+    pub id: u32,
+    pub name: String,
+    pub data_type: TupleValueType,
+    pub nullable: bool,
+    /*default_value: Option<String>,*/
+    pub table_ref: DbObjectRef,
+}
+
+impl From<&Tuple> for AttributeDesc {
+    fn from(value: &Tuple) -> Self {
+        let table_ref = match value.values[0] {
+            Some(TupleValue::Int(id)) => id as u32,
+            _ => unreachable!()
+        };
+        let id = match value.values[1] {
+            Some(TupleValue::Int(id)) => id,
+            _ => unreachable!()
+        };
+        let name = match value.values[2] {
+            Some(TupleValue::String(ref name)) => name.clone(),
+            _ => unreachable!()
+        };
+        let data_type = match value.values[3] {
+            Some(TupleValue::SmallInt(data_type)) => {
+                match data_type {
+                    0 => TupleValueType::BigInt,
+                    1 => TupleValueType::VarChar(value.values[4].as_ref().unwrap().as_small_int() as u16),
+                    2 => TupleValueType::Int,
+                    3 => TupleValueType::SmallInt,
+                    _ => unreachable!()
+                }
+            },
+            _ => unreachable!()
+        };
+        let nullable = match value.values[5] {
+            Some(TupleValue::SmallInt(integrity_constraint_flags)) => integrity_constraint_flags == 0,
+            _ => unreachable!()
+        };
+        AttributeDesc { id: id as u32, name, data_type, nullable, table_ref }
+    }
+}
+
+impl From<&AttributeDesc> for Tuple {
+    fn from(value: &AttributeDesc) -> Self {
+        let (data_type, length) = match value.data_type {
+            TupleValueType::BigInt => (0, 0),
+            TupleValueType::VarChar(length) => (1, length as i32),
+            TupleValueType::Int => (2, 0),
+            TupleValueType::SmallInt => (3, 0),
+            TupleValueType::VarBinary(length) => (4, length as i32)
+        };
+        let integrity_constraint_flags = if value.nullable { 0 } else { 1 };
+        Tuple::new(vec![
+            Some(TupleValue::Int(value.table_ref as i32)), // db_object_id
+            Some(TupleValue::Int(value.id as i32)), // id
+            Some(TupleValue::String(value.name.clone())), // name
+            Some(TupleValue::SmallInt(data_type)), // data_type
+            Some(TupleValue::SmallInt(length as i16)), // length (where applicable, otherwhise don't care)
+            Some(TupleValue::SmallInt(integrity_constraint_flags)), // integrity_constraint_flags
+        ])
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CombinedTableStatistics {
+    pub table_statistics: TableStatistics,
+    pub attribute_statistics: Vec<AttributeStatistics>
+}
+
+#[derive(Debug, Clone)]
+pub struct TableStatistics {
+    pub tid: RelationTID,
+    pub db_object_id: u32,
+    pub cardinality: Arc<AtomicU64>,
+    pub sampler: Arc<ReservoirSampler>,
+}
+
+impl From<&TableStatistics> for Tuple {
+    fn from(value: &TableStatistics) -> Self {
+        Tuple::new(vec![
+            Some(TupleValue::Int(value.db_object_id as i32)), // db_object_id
+            Some(TupleValue::BigInt(value.cardinality.load(Ordering::Relaxed) as i64)), // cardinality
+            Some(TupleValue::ByteArray(value.sampler.snapshot().into_boxed_slice())), // ReservoirSampler
+        ])
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AttributeStatistics {
+    pub tid: RelationTID,
+    pub db_object_id: u32,
+    pub attribute_id: u32,
+    pub counting_hyperloglog: Arc<CountingHyperLogLog<fn(f64) -> bool>>
+}
+
+impl From<&AttributeStatistics> for Tuple {
+    fn from(value: &AttributeStatistics) -> Self {
+        Tuple::new(vec![
+            Some(TupleValue::Int(value.db_object_id as i32)), // db_object_id
+            Some(TupleValue::Int(value.attribute_id as i32)), // attribute_id
+            Some(TupleValue::ByteArray(Box::new(value.counting_hyperloglog.to_bytes()))), // CountingHyperLogLog
+        ])
+    }
 }
 
 #[derive(Clone)]
@@ -92,6 +220,10 @@ impl<B: BufferManager> Catalog<B> {
         })
     }
 
+    pub fn find_table_by_id(&self, id: u32) -> Result<Option<TableDesc>, B::BError> {
+        self.cache.find_table_by_id(id)
+    }
+
     pub fn find_table_by_name(&self, name: &str) -> Result<Option<TableDesc>, B::BError> {
         self.cache.find_table_by_name(name)
     }
@@ -99,9 +231,12 @@ impl<B: BufferManager> Catalog<B> {
     pub fn create_table(&self, table: &TableDesc) -> Result<(), B::BError> {
         self.cache.create_table(table)
     }
+    pub fn find_index_by_name(&self, name: &str) -> Result<Option<IndexDesc>, B::BError> {
+        self.cache.find_index_by_name(name)
+    }
 
-    pub fn create_index(&self, index: &TableDesc) -> Result<(), B::BError> {
-        todo!()
+    pub fn create_index(&self, index: &IndexDesc) -> Result<(), B::BError> {
+        self.cache.create_index(index)
     }
 
     pub fn get_statistics(&self, table_id: u32) -> Result<Option<CombinedTableStatistics>, B::BError> {
@@ -127,8 +262,10 @@ struct CatalogCache<B:BufferManager> {
     attribute_segment: AttributeCatalogSegment<B>,
     table_statistics_segment: TableStatisticsCatalogSegment<B>,
     attribute_statistics_segment: AttributeStatisticsCatalogSegment<B>,
+    index_segment: IndexCatalogSegment<B>,
     table_cache: RwLock<BTreeMap<u32, TableDesc>>,
     table_name_index: RwLock<BTreeMap<String, u32>>,
+    index_name_index: RwLock<BTreeMap<String, (u32, u32)>>,
     statistics: RwLock<BTreeMap<u32, CombinedTableStatistics>>,
     db_object_id_counter: AtomicU32,
     attribute_id_counter: AtomicU32,
@@ -139,6 +276,9 @@ impl<B: BufferManager> CatalogCache<B> {
     fn new(buffer_manager: B, db_config: Arc<DbConfig>) -> Result<CatalogCache<B>, B::BError> {
         let db_object_segment = DbObjectCatalogSegment::new(buffer_manager.clone());
         let attribute_segment = AttributeCatalogSegment::new(buffer_manager.clone());
+        let table_statistics_segment = TableStatisticsCatalogSegment::new(buffer_manager.clone(), db_config.clone());
+        let attribute_statistics_segment = AttributeStatisticsCatalogSegment::new(buffer_manager.clone());
+        let index_segment = IndexCatalogSegment::new(buffer_manager.clone());
         // Kind of hacky way to get counters for allocating new ids
         // Scan the db_object table for the highest id
         let (max_db_object_id, max_segment_id) = db_object_segment.get_max_id_and_segment_id()?;
@@ -146,14 +286,17 @@ impl<B: BufferManager> CatalogCache<B> {
         let db_object_id_counter = AtomicU32::new(max_db_object_id + 1);
         let attribute_id_counter = AtomicU32::new(max_attribute_id + 1);
         let segment_id_counter = AtomicU32::new(max_segment_id.max(1023) + 1);
+        // TODO: Load all tables and indices into the cache
         Ok(CatalogCache {
             bm: buffer_manager.clone(),
             db_object_segment,
             attribute_segment,
-            table_statistics_segment: TableStatisticsCatalogSegment::new(buffer_manager.clone(), db_config.clone()),   
-            attribute_statistics_segment: AttributeStatisticsCatalogSegment::new(buffer_manager.clone()),
+            table_statistics_segment,   
+            attribute_statistics_segment,
+            index_segment,
             table_cache: RwLock::new(BTreeMap::new()),
             table_name_index: RwLock::new(BTreeMap::new()),
+            index_name_index: RwLock::new(BTreeMap::new()),
             statistics: RwLock::new(BTreeMap::new()),
             db_object_id_counter,
             attribute_id_counter,
@@ -161,15 +304,85 @@ impl<B: BufferManager> CatalogCache<B> {
         })
     }
 
+    fn find_table_by_id(&self, id: u32) -> Result<Option<TableDesc>, B::BError> {
+        // TODO: Eliminate duplicate code
+        if let Some(table) = self.table_cache.read().get(&id) {
+            return Ok(Some(table.clone()));
+        } else {
+            let db_object = self.db_object_segment.get_db_object_by_id(id)?;
+            if let Some(db_object) = db_object {
+                if db_object.class_type != DbObjectType::Relation {
+                    return Ok(None);
+                }
+                let attributes = self.attribute_segment.get_attributes_by_db_object(db_object.id)?;
+                let indexes = self.index_segment.get_by_indexed_db_obj_id(db_object.id)?.iter()
+                    .map(|i| {
+                        let db_object = self.db_object_segment.get_db_object_by_id(i.db_obj_id).unwrap().unwrap();
+                        IndexDesc {
+                            id: i.db_obj_id,
+                            name: db_object.name,
+                            indexed_id: i.indexed_db_obj_id,
+                            index_type: i.index_type,
+                            attributes: i.attributes.clone(),
+                            segment_id: db_object.segment_id,
+                            fsi_segment_id: db_object.fsi_segment_id
+                        }
+                    })
+                    .collect();
+                let table = TableDesc {
+                    id: db_object.id,
+                    name: db_object.name,
+                    attributes,
+                    segment_id: db_object.segment_id,
+                    fsi_segment_id: db_object.fsi_segment_id.unwrap(),
+                    sample_segment_id: db_object.sample_segment_id.unwrap(),
+                    sample_fsi_segment_id: db_object.sample_fsi_segment_id.unwrap(),
+                    indexes
+                };
+                let mut table_name_cache = self.table_name_index.write();
+                let mut table_cache = self.table_cache.write();
+                if let Some(table) = table_cache.get(&table.id) {
+                    let cached_table = &self.table_cache.read()[&table.id];
+                    let table = cached_table.clone();
+                    return Ok(Some(table));
+                } else {
+                    table_name_cache.insert(table.name.clone(), table.id);
+                    table_cache.insert(table.id, table.clone());
+                    return Ok(Some(table));
+                }
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
     fn find_table_by_name(&self, name: &str) -> Result<Option<TableDesc>, B::BError> {
         if let Some(table_id) = self.table_name_index.read().get(name) {
-            let cached_table = &self.table_cache.read()[table_id];
-            let table = cached_table.clone();
-            return Ok(Some(table));
+            if let Some(table) = self.table_cache.read().get(table_id) {
+                let cached_table = &self.table_cache.read()[table_id];
+                let table = cached_table.clone();
+                return Ok(Some(table));
+            } else {
+                return Ok(None);
+            }
         }
         let db_object = self.db_object_segment.find_db_object_by_name(DbObjectType::Relation, name)?;
         if let Some(db_object) = db_object {
             let attributes = self.attribute_segment.get_attributes_by_db_object(db_object.id)?;
+            let indexes = self.index_segment.get_by_indexed_db_obj_id(db_object.id)?.iter()
+                .map(|i| {
+                    let db_object = self.db_object_segment.get_db_object_by_id(i.db_obj_id).unwrap().unwrap();
+                    IndexDesc { 
+                        id: i.db_obj_id, 
+                        name: db_object.name,
+                        indexed_id: i.indexed_db_obj_id, 
+                        index_type: i.index_type, 
+                        attributes: i.attributes.clone(), 
+                        segment_id: db_object.segment_id, 
+                        fsi_segment_id: db_object.fsi_segment_id 
+                    }
+                })
+                .collect();
             let table = TableDesc { 
                 id: db_object.id, 
                 name: db_object.name, 
@@ -177,7 +390,8 @@ impl<B: BufferManager> CatalogCache<B> {
                 segment_id: db_object.segment_id, 
                 fsi_segment_id: db_object.fsi_segment_id.unwrap(), 
                 sample_segment_id: db_object.sample_segment_id.unwrap(), 
-                sample_fsi_segment_id: db_object.sample_fsi_segment_id.unwrap()
+                sample_fsi_segment_id: db_object.sample_fsi_segment_id.unwrap(),
+                indexes
             };
             let mut table_name_cache = self.table_name_index.write();
             let mut table_cache = self.table_cache.write();
@@ -198,6 +412,9 @@ impl<B: BufferManager> CatalogCache<B> {
     fn create_table(&self, table: &TableDesc) -> Result<(), B::BError> {
         // TODO: Properly synchronize this. Make sure that the table is only visible
         //       after it has been fully created including statistics.
+        //       Also once removing tables and indices is implemented we must hold 
+        //       a read lock to the schema/catalog/db_object or something as long as we are doing something
+        //       and a write lock when we are changing the schema.
         let mut table_cache = self.table_cache.write();
         table_cache.insert(table.id, table.clone());
         let db_object = DbObjectDesc { id: table.id, name: table.name.clone(), class_type: DbObjectType::Relation, segment_id: table.segment_id, fsi_segment_id: Some(table.fsi_segment_id), sample_segment_id: Some(table.sample_segment_id), sample_fsi_segment_id: Some(table.sample_fsi_segment_id) };
@@ -210,6 +427,92 @@ impl<B: BufferManager> CatalogCache<B> {
         // go through the table name cache where the new table is only inserted after everything is done.
         let mut table_name_cache = self.table_name_index.write();
         table_name_cache.insert(table.name.clone(), table.id);
+        Ok(())
+    }
+
+    pub fn find_index_by_name(&self, name: &str) -> Result<Option<IndexDesc>, B::BError> {
+        let (table_id, index_id) = if let Some((indexed_id, index_id)) = self.index_name_index.read().get(name) {
+            (*indexed_id, *index_id)
+        } else {
+            let index = self.db_object_segment.find_db_object_by_name(DbObjectType::Index, name)?;
+            if let Some(index) = index {
+                let index_details_desc = self.index_segment.get_by_db_obj_id(index.id)?.unwrap();
+                let index = IndexDesc {
+                    id: index.id,
+                    name: index.name,
+                    indexed_id: index_details_desc.indexed_db_obj_id,
+                    index_type: index_details_desc.index_type,
+                    attributes: index_details_desc.attributes.clone(),
+                    segment_id: index.segment_id,
+                    fsi_segment_id: index.fsi_segment_id
+                };
+                let mut index_name_cache = self.index_name_index.write();
+                index_name_cache.insert(index.name.clone(), (index.indexed_id, index.id));
+                (index.indexed_id, index.id)
+            } else {
+                return Ok(None);
+            }
+        };
+
+        if let Some(table) = self.table_cache.read().get(&table_id) {
+            let index = table.indexes.iter().find(|i| i.id == index_id).unwrap();
+            Ok(Some(index.clone()))
+        } else {
+            // TODO: Remove this duplicated code
+            let table = self.db_object_segment.get_db_object_by_id(table_id).unwrap().unwrap();
+            let attributes = self.attribute_segment.get_attributes_by_db_object(table_id)?;
+            let indexes = self.index_segment.get_by_indexed_db_obj_id(table_id)?.iter()
+                .map(|i| {
+                    let db_object = self.db_object_segment.get_db_object_by_id(i.db_obj_id).unwrap().unwrap();
+                    IndexDesc { 
+                        id: i.db_obj_id, 
+                        name: db_object.name,
+                        indexed_id: i.indexed_db_obj_id, 
+                        index_type: i.index_type, 
+                        attributes: i.attributes.clone(), 
+                        segment_id: db_object.segment_id, 
+                        fsi_segment_id: db_object.fsi_segment_id 
+                    }
+                })
+                .collect();
+            let table = TableDesc { 
+                id: table.id, 
+                name: table.name, 
+                attributes, 
+                segment_id: table.segment_id, 
+                fsi_segment_id: table.fsi_segment_id.unwrap(), 
+                sample_segment_id: table.sample_segment_id.unwrap(), 
+                sample_fsi_segment_id: table.sample_fsi_segment_id.unwrap(),
+                indexes
+            };
+            let mut table_cache = self.table_cache.write();
+            table_cache.entry(table.id).or_insert(table.clone());
+            Ok(table.indexes.iter().find(|i| i.id == index_id).cloned())
+        }
+    }
+
+    pub fn create_index(&self, index: &IndexDesc) -> Result<(), B::BError> {
+        let mut table_cache = self.table_cache.write();
+        let table = table_cache.get_mut(&index.indexed_id).unwrap();
+        table.indexes.push(index.clone());
+        let details = IndexDetailsDesc { 
+            db_obj_id: index.id, 
+            indexed_db_obj_id: index.indexed_id, 
+            index_type: index.index_type, 
+            attributes: index.attributes.clone()
+        };
+        self.index_segment.insert_index(&details).unwrap();
+        let db_obj = DbObjectDesc { 
+            id: index.id, 
+            name: index.name.clone(), 
+            class_type: DbObjectType::Index, 
+            segment_id: index.segment_id, 
+            fsi_segment_id: index.fsi_segment_id,
+            sample_segment_id: None,
+            sample_fsi_segment_id: None
+        };
+        self.db_object_segment.insert_db_object(&db_obj).unwrap();
+        self.index_name_index.write().insert(index.name.clone(), (index.id, index.indexed_id));
         Ok(())
     }
 
@@ -270,233 +573,4 @@ impl<B: BufferManager> Drop for CatalogCache<B> {
 }
 
 
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct AttributeDesc {
-    pub id: u32,
-    pub name: String,
-    pub data_type: TupleValueType,
-    pub nullable: bool,
-    /*default_value: Option<String>,*/
-    pub table_ref: DbObjectRef,
-}
-
-
-impl From<&Tuple> for AttributeDesc {
-    fn from(value: &Tuple) -> Self {
-        let table_ref = match value.values[0] {
-            Some(TupleValue::Int(id)) => id as u32,
-            _ => unreachable!()
-        };
-        let id = match value.values[1] {
-            Some(TupleValue::Int(id)) => id,
-            _ => unreachable!()
-        };
-        let name = match value.values[2] {
-            Some(TupleValue::String(ref name)) => name.clone(),
-            _ => unreachable!()
-        };
-        let data_type = match value.values[3] {
-            Some(TupleValue::SmallInt(data_type)) => {
-                match data_type {
-                    0 => TupleValueType::BigInt,
-                    1 => TupleValueType::VarChar(value.values[4].as_ref().unwrap().as_small_int() as u16),
-                    2 => TupleValueType::Int,
-                    3 => TupleValueType::SmallInt,
-                    _ => unreachable!()
-                }
-            },
-            _ => unreachable!()
-        };
-        let nullable = match value.values[5] {
-            Some(TupleValue::SmallInt(integrity_constraint_flags)) => integrity_constraint_flags == 0,
-            _ => unreachable!()
-        };
-        AttributeDesc { id: id as u32, name, data_type, nullable, table_ref }
-    }
-}
-
-impl From<&AttributeDesc> for Tuple {
-    fn from(value: &AttributeDesc) -> Self {
-        let (data_type, length) = match value.data_type {
-            TupleValueType::BigInt => (0, 0),
-            TupleValueType::VarChar(length) => (1, length as i32),
-            TupleValueType::Int => (2, 0),
-            TupleValueType::SmallInt => (3, 0),
-            TupleValueType::VarBinary(length) => (4, length as i32)
-        };
-        let integrity_constraint_flags = if value.nullable { 0 } else { 1 };
-        Tuple::new(vec![
-            Some(TupleValue::Int(value.table_ref as i32)), // db_object_id
-            Some(TupleValue::Int(value.id as i32)), // id
-            Some(TupleValue::String(value.name.clone())), // name
-            Some(TupleValue::SmallInt(data_type)), // data_type
-            Some(TupleValue::SmallInt(length as i16)), // length (where applicable, otherwhise don't care)
-            Some(TupleValue::SmallInt(integrity_constraint_flags)), // integrity_constraint_flags
-        ])
-    }
-}
-
-struct AttributeCatalogSegment<B: BufferManager> {
-    sp_segment: SlottedPageHeapStorage<B>,
-}
-
-impl<B: BufferManager> AttributeCatalogSegment<B> {
-    fn new(buffer_manager: B) -> AttributeCatalogSegment<B> {
-        let attributes = vec![
-            TupleValueType::Int, // db_object_id
-            TupleValueType::Int, // id
-            TupleValueType::VarChar(u16::MAX), // name
-            TupleValueType::SmallInt, // data_type
-            TupleValueType::SmallInt, // length (where applicable, otherwhise don't care)
-            TupleValueType::SmallInt, // integrity_constraint_flags
-        ];
-        let segment = SlottedPageSegment::new(buffer_manager, ATTRIBUTE_CATALOG_SEGMENT_ID, ATTRIBUTE_CATALOG_SEGMENT_ID + 1);
-        AttributeCatalogSegment {
-            sp_segment: SlottedPageHeapStorage::new(segment, attributes)
-        }
-    }
-
-    fn get_max_id(&self) -> Result<u32, B::BError> {
-        self.sp_segment.scan_all(|_| true)?
-            .map(|f| f.map(|t| AttributeDesc::from(&t.1).id))
-            .fold(Ok(0), |acc, id| {
-                match (acc, id) {
-                    (Ok(acc), Ok(id)) => Ok(std::cmp::max(acc, id)),
-                    (Err(e), _) => Err(e),
-                    (_, Err(e)) => Err(e)
-                }
-            })
-    }
-
-    fn get_attributes_by_db_object(&self, db_object_id: u32) -> Result<Vec<AttributeDesc>, B::BError> {
-        self.sp_segment.scan_all(|data| {
-            let attribute_desc = AttributeDesc::from(data);
-            attribute_desc.table_ref == db_object_id
-        })?.map(|f| f.map(|t| AttributeDesc::from(&t.1)))
-        .collect()
-    }
-
-    #[allow(dead_code)]
-    fn get_attribute_by_db_object_and_name(&self, db_object_id: u32, name: &str) -> Result<Option<AttributeDesc>, B::BError> {
-        let result = self.sp_segment.scan_all(|data| {
-            let attribute_desc = AttributeDesc::from(data);
-            attribute_desc.table_ref == db_object_id && attribute_desc.name == name
-        })?.next();
-        match result {
-            Some(Ok((_, tuple))) => Ok(Some(AttributeDesc::from(&tuple))),
-            Some(Err(e)) => Err(e),
-            None => Ok(None)
-        }
-    }
-
-    fn insert_attribute(&self, attribute: &AttributeDesc) -> Result<(), B::BError> {
-        let tuple = Tuple::from(attribute);
-        self.sp_segment.insert_tuples(&mut [tuple])?;
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    fn update_attribute(&self, attribute: AttributeDesc) -> Result<(), B::BError> {
-        let (tid, _) = self.sp_segment.scan_all(|data| {
-            let attribute_desc = AttributeDesc::from(data);
-            attribute_desc.id == attribute.id
-        })?.next().unwrap().unwrap();
-        let tuple = Tuple::from(&attribute);
-        self.sp_segment.update_tuple(tid, tuple)?;
-        Ok(())
-    }
-}
-
-
-#[derive(Debug, Clone)]
-pub struct TableStatistics {
-    pub tid: RelationTID,
-    pub db_object_id: u32,
-    pub cardinality: Arc<AtomicU64>,
-    pub sampler: Arc<ReservoirSampler>
-}
-
-impl From<&TableStatistics> for Tuple {
-    fn from(value: &TableStatistics) -> Self {
-        Tuple::new(vec![
-            Some(TupleValue::Int(value.db_object_id as i32)), // db_object_id
-            Some(TupleValue::BigInt(value.cardinality.load(Ordering::Relaxed) as i64)), // cardinality
-            Some(TupleValue::ByteArray(value.sampler.snapshot().into_boxed_slice())), // ReservoirSampler
-        ])
-    }
-}
-
-struct TableStatisticsCatalogSegment<B: BufferManager> {
-    sp_segment: SlottedPageHeapStorage<B>,
-    db_config: Arc<DbConfig>
-}
-
-impl<B: BufferManager> TableStatisticsCatalogSegment<B> {
-    fn new(buffer_manager: B, db_config: Arc<DbConfig>) -> TableStatisticsCatalogSegment<B> {
-        let attributes = vec![
-            TupleValueType::Int, // db_object_id
-            TupleValueType::BigInt, // cardinality
-            TupleValueType::VarBinary(u16::MAX), // ReservoirSampler Snapshot
-        ];
-        let segment = SlottedPageSegment::new(buffer_manager, TABLE_STATISTICS_CATALOG_SEGMENT_ID, TABLE_STATISTICS_CATALOG_SEGMENT_ID + 1);
-        TableStatisticsCatalogSegment {
-            sp_segment: SlottedPageHeapStorage::new(segment, attributes),
-            db_config
-        }
-    }
-
-    fn get_table_statistics_by_db_object(&self, _db_object_id: u32) -> Result<Option<TableStatistics>, B::BError> {
-        let result = self.sp_segment.scan_all(|data| {
-            let db_object_id = match data.values[0] {
-                Some(TupleValue::Int(db_object_id)) => db_object_id as u32,
-                _ => unreachable!()
-            };
-            db_object_id == db_object_id
-        })?.next();
-        match result {
-            Some(Ok((tid, tuple))) => {
-                let db_object_id = match tuple.values[0] {
-                    Some(TupleValue::Int(db_object_id)) => db_object_id as u32,
-                    _ => unreachable!()
-                };
-                let cardinality = match tuple.values[1] {
-                    Some(TupleValue::BigInt(cardinality)) => Arc::new(AtomicU64::new(cardinality as u64)),
-                    _ => unreachable!()
-                };
-                let sampler = match tuple.values[2] {
-                    Some(TupleValue::ByteArray(ref sampler)) => Arc::new(ReservoirSampler::parse(sampler.as_ref(), self.db_config.n_threads)),
-                    _ => unreachable!()
-                };
-                Ok(Some(TableStatistics { tid, db_object_id, cardinality, sampler }))
-            },
-            Some(Err(e)) => Err(e),
-            None => Ok(None)
-        }
-    }
-
-    fn create_table_statistics(&self, db_object_id: u32) -> Result<TableStatistics, B::BError> {
-        let sampler = Arc::new(ReservoirSampler::new(SAMPLE_SIZE, self.db_config.n_threads));
-        let cardinality = Arc::new(AtomicU64::new(0));
-        let tuple = Tuple::new(vec![
-            Some(TupleValue::Int(db_object_id as i32)), // db_object_id
-            Some(TupleValue::BigInt(0)), // cardinality
-            Some(TupleValue::ByteArray(sampler.snapshot().into_boxed_slice())), // ReservoirSampler
-        ]);
-        let tid = self.sp_segment.insert_tuples(&mut [tuple])?[0];
-        Ok(TableStatistics { tid, db_object_id, cardinality, sampler })
-    }
-
-    fn update_table_statistics(&self, table_statistics: &TableStatistics) -> Result<(), B::BError> {
-        let tuple = Tuple::from(table_statistics);
-        self.sp_segment.update_tuple(table_statistics.tid, tuple)?;
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    fn delete_table_statistics(&self, table_statistics: TableStatistics) -> Result<(), B::BError> {
-        self.sp_segment.delete_tuple(table_statistics.tid)?;
-        Ok(())
-    }
-}
 

@@ -20,7 +20,6 @@ use crate::types::{TupleValue, TupleValueType};
     Here's the current flag layout:
     bit | description
     -----------------
-    0   | was the tuple originally added to the sample if there is one (no update on overwrite)
  */
 // TODO: Implement flags
 #[derive(Debug, PartialEq, Clone)]

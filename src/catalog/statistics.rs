@@ -1,30 +1,79 @@
-use std::sync::Arc;
+use std::sync::{atomic::AtomicU64, Arc};
 
-use crate::{types::{RelationTID, TupleValue, TupleValueType}, statistics::counting_hyperloglog::CountingHyperLogLog, access::{tuple::Tuple, SlottedPageHeapStorage, SlottedPageSegment, HeapStorage}, storage::buffer_manager::BufferManager};
+use crate::{access::{tuple::Tuple, HeapStorage, SlottedPageHeapStorage, SlottedPageSegment}, config::DbConfig, statistics::{counting_hyperloglog::CountingHyperLogLog, sampling::ReservoirSampler}, storage::buffer_manager::BufferManager, types::{RelationTID, TupleValue, TupleValueType}};
 
-use super::{TableStatistics, ATTRIBUTE_STATISTICS_CATALOG_SEGMENT_ID};
+use super::{AttributeStatistics, TableStatistics, ATTRIBUTE_STATISTICS_CATALOG_SEGMENT_ID, SAMPLE_SIZE, TABLE_STATISTICS_CATALOG_SEGMENT_ID};
 
-#[derive(Debug, Clone)]
-pub struct CombinedTableStatistics {
-    pub table_statistics: TableStatistics,
-    pub attribute_statistics: Vec<AttributeStatistics>
+pub(super) struct TableStatisticsCatalogSegment<B: BufferManager> {
+    sp_segment: SlottedPageHeapStorage<B>,
+    db_config: Arc<DbConfig>
 }
 
-#[derive(Debug, Clone)]
-pub struct AttributeStatistics {
-    pub tid: RelationTID,
-    pub db_object_id: u32,
-    pub attribute_id: u32,
-    pub counting_hyperloglog: Arc<CountingHyperLogLog<fn(f64) -> bool>>
-}
+impl<B: BufferManager> TableStatisticsCatalogSegment<B> {
+    pub fn new(buffer_manager: B, db_config: Arc<DbConfig>) -> TableStatisticsCatalogSegment<B> {
+        let attributes = vec![
+            TupleValueType::Int, // db_object_id
+            TupleValueType::BigInt, // cardinality
+            TupleValueType::VarBinary(u16::MAX), // ReservoirSampler snapshot
+        ];
+        let segment = SlottedPageSegment::new(buffer_manager, TABLE_STATISTICS_CATALOG_SEGMENT_ID, TABLE_STATISTICS_CATALOG_SEGMENT_ID + 1);
+        TableStatisticsCatalogSegment {
+            sp_segment: SlottedPageHeapStorage::new(segment, attributes),
+            db_config
+        }
+    }
 
-impl From<&AttributeStatistics> for Tuple {
-    fn from(value: &AttributeStatistics) -> Self {
-        Tuple::new(vec![
-            Some(TupleValue::Int(value.db_object_id as i32)), // db_object_id
-            Some(TupleValue::Int(value.attribute_id as i32)), // attribute_id
-            Some(TupleValue::ByteArray(Box::new(value.counting_hyperloglog.to_bytes()))), // CountingHyperLogLog
-        ])
+    pub fn get_table_statistics_by_db_object(&self, _db_object_id: u32) -> Result<Option<TableStatistics>, B::BError> {
+        let result = self.sp_segment.scan_all(|data| {
+            let db_object_id = match data.values[0] {
+                Some(TupleValue::Int(db_object_id)) => db_object_id as u32,
+                _ => unreachable!()
+            };
+            db_object_id == db_object_id
+        })?.next();
+        match result {
+            Some(Ok((tid, tuple))) => {
+                let db_object_id = match tuple.values[0] {
+                    Some(TupleValue::Int(db_object_id)) => db_object_id as u32,
+                    _ => unreachable!()
+                };
+                let cardinality = match tuple.values[1] {
+                    Some(TupleValue::BigInt(cardinality)) => Arc::new(AtomicU64::new(cardinality as u64)),
+                    _ => unreachable!()
+                };
+                let sampler = match tuple.values[2] {
+                    Some(TupleValue::ByteArray(ref sampler)) => Arc::new(ReservoirSampler::parse(sampler.as_ref(), self.db_config.n_threads)),
+                    _ => unreachable!()
+                };
+                Ok(Some(TableStatistics { tid, db_object_id, cardinality, sampler }))
+            },
+            Some(Err(e)) => Err(e),
+            None => Ok(None)
+        }
+    }
+
+    pub fn create_table_statistics(&self, db_object_id: u32) -> Result<TableStatistics, B::BError> {
+        let sampler = Arc::new(ReservoirSampler::new(SAMPLE_SIZE, self.db_config.n_threads));
+        let cardinality = Arc::new(AtomicU64::new(0));
+        let tuple = Tuple::new(vec![
+            Some(TupleValue::Int(db_object_id as i32)), // db_object_id
+            Some(TupleValue::BigInt(0)), // cardinality
+            Some(TupleValue::ByteArray(sampler.snapshot().into_boxed_slice())), // ReservoirSampler
+        ]);
+        let tid = self.sp_segment.insert_tuples(&mut [tuple])?[0];
+        Ok(TableStatistics { tid, db_object_id, cardinality, sampler })
+    }
+
+    pub fn update_table_statistics(&self, table_statistics: &TableStatistics) -> Result<(), B::BError> {
+        let tuple = Tuple::from(table_statistics);
+        self.sp_segment.update_tuple(table_statistics.tid, tuple)?;
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn delete_table_statistics(&self, table_statistics: TableStatistics) -> Result<(), B::BError> {
+        self.sp_segment.delete_tuple(table_statistics.tid)?;
+        Ok(())
     }
 }
 

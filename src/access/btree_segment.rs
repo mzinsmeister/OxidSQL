@@ -31,17 +31,6 @@ impl<B: BufferManager> BTreeSegment<B> {
         }
     }
 
-    pub fn init(&self) {
-        let metadata_page = self.bm.fix_page(PageId::new(self.segment_id, 0)).unwrap();
-        let mut metadata_write = metadata_page.write();
-        metadata_write[0..8].copy_from_slice(&1u64.to_be_bytes());
-        let root_page = self.bm.fix_page(PageId::new(self.segment_id, 1)).unwrap();
-        let mut root_write = root_page.write();
-        let mut root_leaf = BTreePage::parse(root_write.as_mut()).unwrap();
-        root_leaf.init(true);
-        root_leaf.header.flags.set(1); // Leaf
-    }
-
     pub fn lower_bound(self, key: &[Option<TupleValue>]) -> Result<BTreeScan<B>, B::BError> {
         let (_, leaf_page_guard) = self.lookup_leaf_page(key, |b| b.read_owning())?;
         let leaf_page = BTreePage::parse(leaf_page_guard.as_ref()).unwrap();
@@ -63,6 +52,7 @@ impl<B: BufferManager> BTreeSegment<B> {
     fn lookup_leaf_page<T: Deref<Target=Page>>(&self, key: &[Option<TupleValue>], lock: fn(BMArc<B>) -> T)-> Result<(T,T), B::BError> {
         let mut parent_page = lock(self.bm.fix_page(PageId::new(self.segment_id, 0))?);
         let root_page_offset: u64 = u64::from_be_bytes(parent_page[0..8].try_into().unwrap());
+        debug_assert_ne!(root_page_offset, 0, "BTree corrupted or uninitialized");
         let root_page = self.bm.fix_page(PageId::new(self.segment_id, root_page_offset))?;
         let mut current_page_offset = root_page_offset;
         let mut current_page = lock(root_page);
@@ -90,6 +80,18 @@ impl<B: BufferManager> BTreeSegment<B> {
 }
 
 impl<B: BufferManager> Index<B> for BTreeSegment<B> {
+
+    fn init(&self) -> Result<(), B::BError> {
+        let metadata_page = self.bm.fix_page(PageId::new(self.segment_id, 0))?;
+        let mut metadata_write = metadata_page.write();
+        metadata_write[0..8].copy_from_slice(&1u64.to_be_bytes());
+        let root_page = self.bm.fix_page(PageId::new(self.segment_id, 1))?;
+        let mut root_write = root_page.write();
+        let mut root_leaf = BTreePage::parse(root_write.as_mut()).unwrap();
+        root_leaf.init(true);
+        root_leaf.header.flags.set(1); // Leaf
+        Ok(())
+    }
     fn lookup(&self, key: &[Option<TupleValue>]) -> Result<Option<RelationTID>, B::BError> {
         let (_, leaf_page_raw) = self.lookup_leaf_page(key, |b| b.read_owning())?;
         let leaf_page = BTreePage::parse(leaf_page_raw.as_ref()).unwrap();

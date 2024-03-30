@@ -245,6 +245,7 @@ mod test {
             fsi_segment_id: 1001,
             sample_segment_id: 1002,
             sample_fsi_segment_id: 1003,
+            indexes: vec![]
         };
         let source_plan = plan::PhysicalQueryPlanOperator::Tablescan {
             table: table.clone()
@@ -296,7 +297,8 @@ mod test {
             segment_id: 1000,
             fsi_segment_id: 1001,
             sample_segment_id: 1002,
-            sample_fsi_segment_id: 1003
+            sample_fsi_segment_id: 1003,
+            indexes: vec![]
         };
         let table2 = TableDesc {
             id: 1,
@@ -324,6 +326,7 @@ mod test {
                     nullable: false
                 },
             ],
+            indexes: vec![],
             segment_id: 1004,
             fsi_segment_id: 1005,
             sample_segment_id: 1006,

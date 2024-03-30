@@ -7,7 +7,7 @@ pub mod bottomup;
 
 use std::{collections::BTreeMap, fmt::{Formatter, Debug, Display}};
 
-use crate::{catalog::{AttributeDesc, TableDesc}, types::TupleValue, execution::plan::PhysicalQueryPlan, access::tuple::Tuple};
+use crate::{access::tuple::Tuple, catalog::{AttributeDesc, IndexDesc, TableDesc}, execution::plan::PhysicalQueryPlan, types::TupleValue};
 
 #[derive(Debug, Clone)]
 pub struct BoundTable {
@@ -85,10 +85,11 @@ impl BoundAttributeRef {
 }
 
 #[derive(Debug, Clone)]
-pub enum Query {
+pub enum Statement {
     Select(SelectQuery),
-    Insert(InsertQuery),
-    CreateTable(CreateTableQuery),
+    Insert(InsertStatement),
+    CreateTable(CreateTableStatement),
+    CreateIndex(CreateIndexStatement),
     //Update(UpdateQuery),
     //Delete(DeleteQuery)
 }
@@ -130,18 +131,23 @@ pub struct Selection {
 }
 
 #[derive(Debug, Clone)]
-pub struct InsertQuery {
+pub struct InsertStatement {
     pub table: TableDesc,
     pub values: Vec<Tuple>
 }
 
 #[derive(Debug, Clone)]
-pub struct CreateTableQuery {
+pub struct CreateTableStatement {
     pub table: TableDesc
 }
 
+#[derive(Debug, Clone)]
+pub struct CreateIndexStatement {
+    pub index: IndexDesc
+}
+
 pub trait Planner {
-    fn plan(&self, query: Query) -> Result<PhysicalQueryPlan, PlannerError>;
+    fn plan(&self, query: Statement) -> Result<PhysicalQueryPlan, PlannerError>;
 }
 
  pub enum PlannerError {

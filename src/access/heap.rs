@@ -1,17 +1,19 @@
+use std::borrow::Borrow;
 use std::borrow::BorrowMut;
 use std::marker::PhantomData;
+use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
+use aes::cipher::generic_array::GenericArray;
 use aes::cipher::BlockEncrypt;
 use aes::cipher::KeyInit;
-use aes::cipher::generic_array::GenericArray;
 use bitvec::bitvec;
 use bitvec::vec::BitVec;
 
 use crate::catalog::Catalog;
 use crate::catalog::TableDesc;
-use crate::catalog::statistics::AttributeStatistics;
+use crate::catalog::AttributeStatistics;
 use crate::statistics::sampling::ReservoirSampler;
 use crate::storage::buffer_manager::BufferManager;
 use crate::types::RelationTID;
@@ -40,7 +42,8 @@ pub trait HeapStorage<B: BufferManager> {
     fn get_tuple(&self, tid: RelationTID, attributes: &BitVec<usize>) -> Result<Option<Tuple>, B::BError>;
     fn get_tuple_all(&self, tid: RelationTID) -> Result<Option<Tuple>, B::BError>;
     /// The tuples values won't be modified however flags could be set (sampled for example)
-    fn insert_tuples(&self, tuples: &mut [Tuple]) -> Result<Box<[RelationTID]>, B::BError>;
+    fn insert_tuples<V, C>(&self, tuples: &[Tuple<V, C>]) -> Result<Box<[RelationTID]>, B::BError> where V: Borrow<Option<TupleValue>>, C: Deref<Target=[V]>;
+    // TODO: Add in-place update capability for updating single fixed-size attributes
     fn update_tuple(&self, tid: RelationTID, tuple: Tuple) -> Result<(), B::BError>;
     fn delete_tuple(&self, tid: RelationTID) -> Result<(), B::BError>;
     fn scan<P: FnMut(&Tuple) -> bool>(&self, attributes: BitVec<usize>, predicate: P) -> Result<Self::ScanIterator<P>, B::BError>;
@@ -82,7 +85,7 @@ impl<B: BufferManager> HeapStorage<B> for SlottedPageHeapStorage<B> {
         self.get_tuple(tid, &parse_all)
     }
 
-    fn insert_tuples(&self, tuples: &mut [Tuple]) -> Result<Box<[RelationTID]>, <B as BufferManager>::BError> {
+    fn insert_tuples<V, C>(&self, tuples: &[Tuple<V, C>]) -> Result<Box<[RelationTID]>, <B as BufferManager>::BError> where V: Borrow<Option<TupleValue>>, C: Deref<Target=[V]> {
         let mut tids = Vec::with_capacity(tuples.len());
         for tuple in tuples {
             let binary = tuple.get_binary();
@@ -242,24 +245,26 @@ impl<B: BufferManager> HeapStorage<B> for StatisticsCollectingSPHeapStorage<B> {
         self.storage.get_tuple_all(tid)
     }
 
-    fn insert_tuples(&self, tuples: &mut [Tuple]) -> Result<Box<[RelationTID]>, B::BError> {
+    fn insert_tuples<V: Borrow<Option<TupleValue>>, C: Deref<Target=[V]>>(&self, tuples: &[Tuple<V, C>]) -> Result<Box<[RelationTID]>, B::BError> {
         let mut skip = self.reservoir_sampler.get_skip();
         let result = self.storage.insert_tuples(tuples)?;
         // Add to HyperLogLog sketches
         
         for tuple in tuples.iter() {
-            for (i, value) in tuple.values.iter().enumerate() {
-                if let Some(value) = value {
+            for (i, value) in tuple.values.deref().iter().enumerate() {
+                if let Some(value) = value.borrow() {
                     let hash = HASHER.hash_one(value);
                     self.attribute_statistics[i].counting_hyperloglog.add(hash);
                 }
             }
         }
         // Add to sample
-        for (tuple, tid) in tuples.iter_mut().zip(result.iter()) {
+        // TODO: Maintain concurrent hashtable of TID -> Sample TID to check for existence instead of setting a flag in the tuple
+        for (tuple, tid) in tuples.iter().zip(result.iter()) {
             match skip.next() {
                 Some(true) => {
-                    let mut sample_tuple = tuple.clone();
+                    let cloned_values = tuple.values.deref().iter().map(|v| v.borrow().to_owned()).collect::<Vec<Option<TupleValue>>>();
+                    let mut sample_tuple = Tuple::new(cloned_values);
                     sample_tuple.values.insert(0, Some(TupleValue::BigInt(u64::from(tid) as i64)));
                     sample_tuple.values.insert(0, Some(TupleValue::BigInt(skip.skip_index as i64)));
                     let index = if (skip.skip_index as usize) < self.sample_size {
@@ -278,7 +283,7 @@ impl<B: BufferManager> HeapStorage<B> for StatisticsCollectingSPHeapStorage<B> {
                     } else {
                         self.sample_storage.insert_tuples(&mut [sample_tuple])?;
                     }
-                    tuple.flags |= 1;
+                    // tuple.flags |= 1; TODO: rewrite statistics so we don't need this for correct deletes
                     skip = skip.get_new();
                 }
                 None => {
@@ -310,6 +315,7 @@ impl<B: BufferManager> HeapStorage<B> for StatisticsCollectingSPHeapStorage<B> {
         }
 
         // Update Sample
+        // TODO: Rewrite this when rewriting sampling
         if tup.flags & 1 == 1 {
             let mut attributes = bitvec![0; self.sample_storage.attributes.len()];
             attributes.set(0, true);
@@ -345,6 +351,7 @@ impl<B: BufferManager> HeapStorage<B> for StatisticsCollectingSPHeapStorage<B> {
         }
 
         // Update Sample
+        // TODO: Rewrite this when rewriting sampling
         if tuple.flags & 1 == 1 {
             let mut attributes = bitvec![0; self.sample_storage.attributes.len()];
             attributes.set(0, true);

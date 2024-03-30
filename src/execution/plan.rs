@@ -12,7 +12,7 @@
 
 use std::fmt::Debug;
 
-use crate::{types::TupleValue, catalog::TableDesc, access::tuple::Tuple};
+use crate::{access::tuple::Tuple, catalog::{IndexDesc, TableDesc}, types::TupleValue};
 
 pub type IURef = usize; // index of child operator's output
 
@@ -41,7 +41,7 @@ pub type IURef = usize; // index of child operator's output
      // For now we will only support equi-joins. Those are usually implemented most efficiently
      // by hash joins nowerdays. A (Blockwise) nested loop join will probably be added in the future.
      // It would be a goal long term to be able to live without a normal nested loop join because
-     // technically speaking you can unnest all nested subqueries therefore eliminating the need
+     // technically speaking you can unnest all correlated subqueries therefore eliminating the need
      // for nested loop joins (https://cs.emis.de/LNI/Proceedings/Proceedings241/383.pdf). 
      // This is probably quite some work to implement though.
      HashJoin {
@@ -64,6 +64,9 @@ pub type IURef = usize; // index of child operator's output
     },
     CreateTable {
         table: TableDesc,
+    },
+    CreateIndex {
+        index: IndexDesc,
     }
  }
 
