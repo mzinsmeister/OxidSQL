@@ -2,7 +2,7 @@ use std::sync::{atomic::AtomicU64, Arc};
 
 use crate::{access::{tuple::Tuple, HeapStorage, SlottedPageHeapStorage, SlottedPageSegment}, config::DbConfig, statistics::{counting_hyperloglog::CountingHyperLogLog, sampling::ReservoirSampler}, storage::buffer_manager::BufferManager, types::{RelationTID, TupleValue, TupleValueType}};
 
-use super::{AttributeStatistics, TableStatistics, ATTRIBUTE_STATISTICS_CATALOG_SEGMENT_ID, SAMPLE_SIZE, TABLE_STATISTICS_CATALOG_SEGMENT_ID};
+use super::{db_object, AttributeStatistics, TableStatistics, ATTRIBUTE_STATISTICS_CATALOG_SEGMENT_ID, SAMPLE_SIZE, TABLE_STATISTICS_CATALOG_SEGMENT_ID};
 
 pub(super) struct TableStatisticsCatalogSegment<B: BufferManager> {
     sp_segment: SlottedPageHeapStorage<B>,
@@ -21,6 +21,25 @@ impl<B: BufferManager> TableStatisticsCatalogSegment<B> {
             sp_segment: SlottedPageHeapStorage::new(segment, attributes),
             db_config
         }
+    }
+
+    pub fn get_all_table_statistics(&self) -> Result<Vec<TableStatistics>, B::BError> {
+        self.sp_segment.scan_all(|_| true)?
+            .map(|f| f.map(|t| {
+                let db_object_id = match t.1.values[0] {
+                    Some(TupleValue::Int(db_object_id)) => db_object_id as u32,
+                    _ => unreachable!()
+                };
+                let cardinality = match t.1.values[1] {
+                    Some(TupleValue::BigInt(cardinality)) => Arc::new(AtomicU64::new(cardinality as u64)),
+                    _ => unreachable!()
+                };
+                let sampler = match t.1.values[2] {
+                    Some(TupleValue::ByteArray(ref sampler)) => Arc::new(ReservoirSampler::parse(sampler.as_ref(), self.db_config.n_threads)),
+                    _ => unreachable!()
+                };
+                TableStatistics { tid: t.0, db_object_id, cardinality, sampler }
+            })).collect()
     }
 
     pub fn get_table_statistics_by_db_object(&self, _db_object_id: u32) -> Result<Option<TableStatistics>, B::BError> {
@@ -92,6 +111,24 @@ impl<B: BufferManager> AttributeStatisticsCatalogSegment<B> {
         AttributeStatisticsCatalogSegment {
             sp_segment: SlottedPageHeapStorage::new(segment, attributes)
         }
+    }
+
+    pub fn get_all_attribute_statistics(&self) -> Result<Vec<AttributeStatistics>, B::BError> {
+        self.sp_segment.scan_all(|data| true)?.map(|f| f.map(|t| {
+            let db_object_id = match t.1.values[0] {
+                Some(TupleValue::Int(db_object_id)) => db_object_id as u32,
+                _ => unreachable!()
+            };
+            let attribute_id = match t.1.values[1] {
+                Some(TupleValue::Int(attribute_id)) => attribute_id as u32,
+                _ => unreachable!()
+            };
+            let counting_hyperloglog = match t.1.values[2] {
+                Some(TupleValue::ByteArray(ref counting_hyperloglog)) => Arc::new(CountingHyperLogLog::from_bytes(counting_hyperloglog.as_ref().try_into().unwrap())),
+                _ => unreachable!()
+            };
+            AttributeStatistics { tid: t.0, db_object_id, attribute_id, counting_hyperloglog }
+        })).collect()
     }
 
     pub fn get_attribute_statistics_by_db_object(&self, db_object_id: u32) -> Result<Vec<AttributeStatistics>, B::BError> {

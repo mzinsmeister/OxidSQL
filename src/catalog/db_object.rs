@@ -106,6 +106,12 @@ impl<B: BufferManager> DbObjectCatalogSegment<B> {
         }
     }
 
+    pub fn get_all_db_objects(&self) -> Result<Vec<DbObjectDesc>, B::BError> {
+        self.sp_segment.scan_all(|_| true)?
+            .map(|f| f.map(|t| DbObjectDesc::from(&t.1)))
+            .collect()
+    }
+
     pub fn get_max_id_and_segment_id(&self) -> Result<(u32, u32), B::BError> {
         self.sp_segment.scan_all(|_| true)?
             .map(|f| f.map(|t| {

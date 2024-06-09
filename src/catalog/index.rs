@@ -74,6 +74,11 @@ impl<B: BufferManager> IndexCatalogSegment<B> {
         }
     }
 
+    pub fn get_all_indexes(&self) -> Result<Vec<IndexDetailsDesc>, B::BError> {
+        self.sp_segment.scan_all(|_| true)?
+            .map(|f| f.map(|t| IndexDetailsDesc::from(&t.1)))
+            .collect()
+    }
     
     pub fn find_first_index_desc<F: Fn(&IndexDetailsDesc) -> bool>(&self, filter: F) -> Result<Option<(RelationTID, IndexDetailsDesc)>, B::BError>{
         // ParsingDbObjectDesc twice. Could be more efficient.

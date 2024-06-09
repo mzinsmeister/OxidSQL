@@ -22,6 +22,12 @@ impl<B: BufferManager> AttributeCatalogSegment<B> {
         }
     }
 
+    pub fn get_all_attributes(&self) -> Result<Vec<AttributeDesc>, B::BError> {
+        self.sp_segment.scan_all(|_| true)?
+            .map(|f| f.map(|t| AttributeDesc::from(&t.1)))
+            .collect()
+    }
+
     pub fn get_max_id(&self) -> Result<u32, B::BError> {
         self.sp_segment.scan_all(|_| true)?
             .map(|f| f.map(|t| AttributeDesc::from(&t.1).id))

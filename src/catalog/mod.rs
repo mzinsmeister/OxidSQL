@@ -286,7 +286,82 @@ impl<B: BufferManager> CatalogCache<B> {
         let db_object_id_counter = AtomicU32::new(max_db_object_id + 1);
         let attribute_id_counter = AtomicU32::new(max_attribute_id + 1);
         let segment_id_counter = AtomicU32::new(max_segment_id.max(1023) + 1);
-        // TODO: Load all tables and indices into the cache
+
+        // Completely load the catalog into memory
+
+        // Load db_objects
+        let db_objects = db_object_segment.get_all_db_objects()?;
+        let attributes = attribute_segment.get_all_attributes()?;
+        let table_statistics = table_statistics_segment.get_all_table_statistics()?;
+        let attribute_statistics = attribute_statistics_segment.get_all_attribute_statistics()?;
+        let indexes = index_segment.get_all_indexes()?;
+
+        let attributes_map: BTreeMap<u32, Vec<AttributeDesc>> = attributes.into_iter().fold(BTreeMap::new(), |mut acc, a| {
+            acc.entry(a.table_ref).or_insert_with(Vec::new).push(a);
+            acc
+        });
+
+        let index_details_map: BTreeMap<u32, IndexDetailsDesc> = indexes.into_iter().fold(BTreeMap::new(), |mut acc, i| {
+            acc.insert(i.db_obj_id, i);
+            acc
+        });
+
+        let mut index_name_index = BTreeMap::new();
+
+        
+        let mut index_map: BTreeMap<u32, Vec<IndexDesc>> = db_objects.iter()
+            .filter(|db_obj| db_obj.class_type == DbObjectType::Index)
+            .fold(BTreeMap::new(), |mut acc, db_obj| {
+                let detail = index_details_map.get(&db_obj.id).unwrap();
+                let index = IndexDesc {
+                    id: db_obj.id,
+                    name: db_obj.name.clone(),
+                    indexed_id: detail.indexed_db_obj_id,
+                    index_type: detail.index_type,
+                    attributes: detail.attributes.clone(),
+                    segment_id: db_obj.segment_id,
+                    fsi_segment_id: db_obj.fsi_segment_id
+                };
+                index_name_index.insert(index.name.clone(), (index.indexed_id, index.id));
+                acc.entry(detail.indexed_db_obj_id).or_insert_with(Vec::new).push(index);
+                acc
+            });
+
+        let mut attribute_statistics_map = attribute_statistics.into_iter().fold(BTreeMap::new(), |mut acc, a| {
+            acc.entry(a.db_object_id).or_insert_with(Vec::new).push(a);
+            acc
+        });
+
+        let mut statistics_map: BTreeMap<u32, CombinedTableStatistics> = BTreeMap::new();
+
+        for table_stat in table_statistics {
+            let mut attribute_stats = attribute_statistics_map.remove(&(table_stat.db_object_id)).unwrap_or_default();
+            attribute_stats.sort_by(|a, b| a.attribute_id.cmp(&b.attribute_id));
+            statistics_map.insert(table_stat.db_object_id, CombinedTableStatistics { table_statistics: table_stat, attribute_statistics: attribute_stats });
+        }
+
+        let mut table_name_index = BTreeMap::new();
+        let mut table_cache = BTreeMap::new();
+
+        db_objects.into_iter()
+            .filter(|db_obj| db_obj.class_type == DbObjectType::Relation)
+            .for_each(|db_obj| {
+                let attributes = attributes_map.get(&db_obj.id).unwrap();
+                let indexes = index_map.remove(&db_obj.id).unwrap();
+                let table = TableDesc {
+                    id: db_obj.id,
+                    name: db_obj.name,
+                    attributes: attributes.clone(),
+                    segment_id: db_obj.segment_id,
+                    fsi_segment_id: db_obj.fsi_segment_id.unwrap(),
+                    sample_segment_id: db_obj.sample_segment_id.unwrap(),
+                    sample_fsi_segment_id: db_obj.sample_fsi_segment_id.unwrap(),
+                    indexes: indexes.clone()
+                };
+                table_name_index.insert(table.name.clone(), table.id);
+                table_cache.insert(table.id, table);
+            });
+       
         Ok(CatalogCache {
             bm: buffer_manager.clone(),
             db_object_segment,
@@ -294,10 +369,10 @@ impl<B: BufferManager> CatalogCache<B> {
             table_statistics_segment,   
             attribute_statistics_segment,
             index_segment,
-            table_cache: RwLock::new(BTreeMap::new()),
-            table_name_index: RwLock::new(BTreeMap::new()),
-            index_name_index: RwLock::new(BTreeMap::new()),
-            statistics: RwLock::new(BTreeMap::new()),
+            table_cache: RwLock::new(table_cache),
+            table_name_index: RwLock::new(table_name_index),
+            index_name_index: RwLock::new(index_name_index),
+            statistics: RwLock::new(statistics_map),
             db_object_id_counter,
             attribute_id_counter,
             segment_id_counter,
