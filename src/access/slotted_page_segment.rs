@@ -729,18 +729,18 @@ impl<A: Deref<Target = Page> + DerefMut<Target = Page>> SlottedPage<A> {
 
     /// Compactify the page by moving all data to the end of the page and removing any free space in between.
     fn compactify(&mut self) {
-        struct OffsetLengthSlot {
+        struct SlotIdLength {
             slot_id: u16, length: u32
         }
-        let mut offset_slot_map: BTreeMap<usize, OffsetLengthSlot> = BTreeMap::new();
+        let mut offset_slot_map: BTreeMap<usize, SlotIdLength> = BTreeMap::new();
         for slot_id in 0..self.get_slot_count() {
             let slot = self.get_slot(slot_id);
             if let Slot::Slot { offset, length } = slot {
-                offset_slot_map.insert(offset as usize, OffsetLengthSlot { slot_id, length });
+                offset_slot_map.insert(offset as usize, SlotIdLength { slot_id, length });
             }
         }
         let mut new_data_start = self.page.len() as u32;
-        for (offset, slot) in offset_slot_map.iter() {
+        for (offset, slot) in offset_slot_map.iter().rev() {
             new_data_start = new_data_start - slot.length;
             self.page.copy_within(*offset..*offset + slot.length as usize, new_data_start as usize);
             let new_slot = Slot::new(new_data_start, slot.length);
@@ -752,9 +752,10 @@ impl<A: Deref<Target = Page> + DerefMut<Target = Page>> SlottedPage<A> {
 
 #[cfg(test)]
 mod test {
-    use crate::{storage::{disk::DiskManager, buffer_manager::{mock::MockBufferManager, BufferManager, HashTableBufferManager}, page::{PAGE_SIZE, PageId, PageState}, clock_replacer::ClockReplacer}, access::{slotted_page_segment::HEADER_SIZE}, types::RelationTID};
 
-    use super::SlottedPageSegment;
+    use crate::{access::{slotted_page_segment::HEADER_SIZE, SlottedPageSegment}, storage::{buffer_manager::{mock::MockBufferManager, BufferManager, HashTableBufferManager}, clock_replacer::ClockReplacer, disk::DiskManager, page::{Page, PageId, PageState, PAGE_SIZE}}, types::RelationTID, util::align::{alligned_slice, AlignedSlice}};
+
+    use super::{Slot, SlottedPage};
 
     
     #[test]
@@ -1112,6 +1113,45 @@ mod test {
         let tid = testee.insert_record(&data).unwrap();
         testee.erase_record(tid).unwrap();
         assert_eq!(testee.get_record(tid, |_| {panic!()}).unwrap(), None);
+    }
+
+    #[test]
+    fn test_compactify() {
+        let aligned_slice = alligned_slice(PAGE_SIZE, 1);
+        let mut page = Page::new_from(PageId::new(1,1), aligned_slice);
+        let mut slotted_page = SlottedPage::new(&mut page);
+        slotted_page.initialize();
+        let useable_size = PAGE_SIZE - HEADER_SIZE;
+        let num_records = useable_size / 16;
+        for i in 0..num_records {
+            let slot_id = slotted_page.allocate(8).unwrap();
+            let slot = slotted_page.get_slot(slot_id);
+            if let Slot::Slot { offset, length } = slot {
+                slotted_page.get_record_mut(offset, length).copy_from_slice(&i.to_be_bytes());
+            } else {
+                panic!();
+            }
+        }
+
+        slotted_page.erase(0);
+        slotted_page.erase(1);
+
+        slotted_page.compactify();
+
+        for i in 0..2 {
+            let slot = slotted_page.get_slot(i);
+            assert_eq!(Slot::Free, slot);
+        }
+
+        for i in 2..num_records as u16 {
+            let slot = slotted_page.get_slot(i);
+            if let Slot::Slot { offset, length } = slot {
+                let record = slotted_page.get_record(offset, length);
+                assert_eq!((i as u64).to_be_bytes(), record);
+            } else {
+                panic!();
+            }
+        }
     }
 
     #[test]
