@@ -1,5 +1,7 @@
 use std::{cell::RefCell, collections::HashMap, error::Error, rc::Rc};
 
+use bitvec::vec::BitVec;
+
 use crate::{access::{tuple::Tuple, BTreeSegment, HeapStorage, Index, SlottedPageScan, SlottedPageSegment, StatisticsCollectingSPHeapStorage}, catalog::{AttributeDesc, Catalog, IndexDesc, IndexType, TableDesc, SAMPLE_SIZE}, execution::plan::{self, PhysicalQueryPlan, PhysicalQueryPlanOperator, TupleWriter}, storage::buffer_manager::BufferManager, types::{TupleValue, TupleValueType}};
 
 use super::ExecutionEngine;
@@ -407,7 +409,28 @@ impl<B: BufferManager> Operator for CreateIndex<B> {
         };
         index.init()?;
         self.catalog.create_index(&self.index)?;
-        // TODO: Insert previous tuples into index
+        // TODO: Include this in IndexDesc?
+        let indexed_table = self.catalog.find_table_by_id(self.index.indexed_id).unwrap().unwrap();
+        let indexed_table_heap = StatisticsCollectingSPHeapStorage::new(&indexed_table, self.buffer_manager.clone(), self.catalog.clone(), SAMPLE_SIZE as usize)?;
+        let mut attributes_bitvec = BitVec::new();
+        let mut attributes_pos = Vec::new();
+        for (i, attribute) in indexed_table.attributes.iter().enumerate() {
+            if self.index.attributes.contains(&attribute.id) {
+                attributes_bitvec.push(true);
+                attributes_pos.push(i);
+            } else {
+                attributes_bitvec.push(false);
+            }
+        }
+        let scan = indexed_table_heap.scan(attributes_bitvec, |_| true).unwrap();
+        for tuple in scan {
+            let (tid, tuple) = tuple?;
+            let mut key = Vec::with_capacity(self.index.attributes.len());
+            for i in &attributes_pos {
+                key.push(tuple.values[*i].to_owned());
+            }
+            index.insert(&key, tid)?;
+        }
         Ok(false)
     }
 
