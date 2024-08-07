@@ -70,6 +70,15 @@ impl Page {
         }
     }
 
+    #[cfg(test)]
+    pub fn new_from(page_id: PageId, data: AlignedSlice) -> Page {
+        Page {
+            state: PageState::CLEAN,
+            id: page_id,
+            data
+        }
+    }
+
     #[inline(always)]
     pub fn get_u16(&self, pos: usize) -> u16 {
         u16::from_be_bytes(self.data[pos..pos+2].try_into().unwrap())
