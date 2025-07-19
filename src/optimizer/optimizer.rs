@@ -2,9 +2,9 @@ use std::collections::{BTreeSet, HashMap};
 
 use itertools::Itertools;
 
-use crate::{execution::plan::{PhysicalQueryPlanOperator, self}, planner::{BoundTableRef, BoundAttributeRef}};
+use crate::{planner::plan::{AlgebraOperator, self}, planner::{BoundTableRef, BoundAttributeRef}};
 
-use super::query_graph::{QueryGraph};
+use super::query_graph::QueryGraph;
 
 // Quite a few todos still here. This is more like a quick and dirty first sketch of a DPccp optimizer.
 // Also since we have neither the representations for the operators nor the representations for the
@@ -13,14 +13,14 @@ use super::query_graph::{QueryGraph};
 // basically only optimizes join order.
 
 pub struct OptimizerResult {
-    pub plan_root: PhysicalQueryPlanOperator,
+    pub plan_root: AlgebraOperator,
     pub cost: f64,
     pub inputs_order: Vec<BoundTableRef>
 }
 
 enum DpJoinRepresentation {
     Join(BTreeSet<BoundTableRef>, BTreeSet<BoundTableRef>, Vec<(BoundAttributeRef, BoundAttributeRef)>, f64, f64),
-    Relation(BoundTableRef, f64, PhysicalQueryPlanOperator),
+    Relation(BoundTableRef, f64, AlgebraOperator),
 }
 
 impl DpJoinRepresentation {
@@ -165,7 +165,7 @@ fn enumerate_cmp(query_graph: &QueryGraph, subgraph: &BTreeSet<BoundTableRef>) -
 }
     
 
-fn dp_get_operator_tree(query_graph: &QueryGraph, dp_table: &HashMap<BTreeSet<BoundTableRef>, DpJoinRepresentation>, subset: &BTreeSet<BoundTableRef>) -> (plan::PhysicalQueryPlanOperator, Vec<(BoundTableRef, usize)>, f64) {
+fn dp_get_operator_tree(query_graph: &QueryGraph, dp_table: &HashMap<BTreeSet<BoundTableRef>, DpJoinRepresentation>, subset: &BTreeSet<BoundTableRef>) -> (plan::AlgebraOperator, Vec<(BoundTableRef, usize)>, f64) {
     match &dp_table[subset] {
         DpJoinRepresentation::Relation(input_id, size, operator) => {
             let num_attributes = query_graph.get_node(input_id).input.table.attributes.len();
@@ -197,7 +197,7 @@ fn dp_get_operator_tree(query_graph: &QueryGraph, dp_table: &HashMap<BTreeSet<Bo
                 operator_predicates.push((left_attr_index, right_attr_index));
             }
             left_order.append(&mut right_order);
-            (plan::PhysicalQueryPlanOperator::HashJoin {
+            (plan::AlgebraOperator::HashJoin {
                 left: Box::new(left_tree),
                 right: Box::new(right_tree),
                 on: operator_predicates
@@ -247,7 +247,7 @@ mod test {
             sample_fsi_segment_id: 1003,
             indexes: vec![]
         };
-        let source_plan = plan::PhysicalQueryPlanOperator::Tablescan {
+        let source_plan = plan::AlgebraOperator::Tablescan {
             table: table.clone()
         };
         query_graph.add_node(BoundTable::new(table.clone(), None), 100, source_plan);
@@ -258,7 +258,7 @@ mod test {
             binding: None,
         }]);
         match result.plan_root {
-            plan::PhysicalQueryPlanOperator::Tablescan { table: t } => {
+            plan::AlgebraOperator::Tablescan { table: t } => {
                 assert_eq!(t, table);
             },
             _ => panic!("plan is not a tablescan")
@@ -332,10 +332,10 @@ mod test {
             sample_segment_id: 1006,
             sample_fsi_segment_id: 1007
         };
-        let source_plan1 = plan::PhysicalQueryPlanOperator::Tablescan {
+        let source_plan1 = plan::AlgebraOperator::Tablescan {
             table: table1.clone()
         };
-        let source_plan2 = plan::PhysicalQueryPlanOperator::Tablescan {
+        let source_plan2 = plan::AlgebraOperator::Tablescan {
             table: table2.clone()
         };
         query_graph.add_node(BoundTable::new(table1.clone(), None), 100, source_plan1);
@@ -373,15 +373,15 @@ mod test {
         ]);
 
         match result.plan_root {
-            plan::PhysicalQueryPlanOperator::HashJoin { left, right, on } => {
+            plan::AlgebraOperator::HashJoin { left, right, on } => {
                 match *left {
-                    plan::PhysicalQueryPlanOperator::Tablescan { table: t } => {
+                    plan::AlgebraOperator::Tablescan { table: t } => {
                         assert_eq!(t, table2);
                     },
                     _ => panic!("plan is not a tablescan")
                 }
                 match *right {
-                    plan::PhysicalQueryPlanOperator::Tablescan { table: t } => {
+                    plan::AlgebraOperator::Tablescan { table: t } => {
                         assert_eq!(t, table1);
                     },
                     _ => panic!("plan is not a tablescan")

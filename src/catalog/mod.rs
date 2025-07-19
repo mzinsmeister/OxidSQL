@@ -347,7 +347,7 @@ impl<B: BufferManager> CatalogCache<B> {
             .filter(|db_obj| db_obj.class_type == DbObjectType::Relation)
             .for_each(|db_obj| {
                 let attributes = attributes_map.get(&db_obj.id).unwrap();
-                let indexes = index_map.remove(&db_obj.id).unwrap();
+                let indexes = index_map.remove(&db_obj.id).unwrap_or_default();
                 let table = TableDesc {
                     id: db_obj.id,
                     name: db_obj.name,

@@ -21,7 +21,7 @@ pub mod database;
 fn main() {
     println!("OxidSQL - Rusty SQL Database\n");
     println!("Currently supported SQL commands: SELECT, INSERT, CREATE TABLE");
-    println!("SELECT syntax: \n      SELECT <attribute list> FROM <table name> [WHERE <condition>]");
+    println!("SELECT syntax: \n      SELECT <attribute list> FROM <table name list> [WHERE <condition>]");
     println!("INSERT syntax (specifying attributes currently not supported):\n      INSERT INTO <table name> VALUES <tuple>");
     println!("CREATE TABLE syntax (PRIMARY KEY can be specified, but currently doesn't do anything):");
     println!("      CREATE TABLE <table name> (<attribute list>)\n");

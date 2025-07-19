@@ -23,20 +23,21 @@ pub type IURef = usize; // index of child operator's output
  // and can do so however it wants. It can e.g. compile the operators to native code
  // or it can interpret them. It can also choose to use a push or pull model and it can
  // choose to use a tuple-at-a-time or a vector-at-a-time model. The plan consisting
- // of PhysicalQueryPlanOperators will just be a contract/api for the execution engine.
+ // of AlgebraOperators will just be a contract/api for the execution engine.
 
 #[derive(Clone, Debug)]
- pub enum PhysicalQueryPlanOperator {
+ pub enum AlgebraOperator {
      Tablescan {
          table: TableDesc,
+         use_index: Option<IndexDesc>,
      },
      Selection {
          predicate: BooleanExpression,
-         input: Box<PhysicalQueryPlanOperator>,
+         input: Box<AlgebraOperator>,
      },
      Projection {
          projection_ius: Vec<IURef>,
-         input: Box<PhysicalQueryPlanOperator>,
+         input: Box<AlgebraOperator>,
      },
      // For now we will only support equi-joins. Those are usually implemented most efficiently
      // by hash joins nowerdays. A (Blockwise) nested loop join will probably be added in the future.
@@ -45,21 +46,21 @@ pub type IURef = usize; // index of child operator's output
      // for nested loop joins (https://cs.emis.de/LNI/Proceedings/Proceedings241/383.pdf). 
      // This is probably quite some work to implement though.
      HashJoin {
-         left: Box<PhysicalQueryPlanOperator>,
-         right: Box<PhysicalQueryPlanOperator>,
+         left: Box<AlgebraOperator>,
+         right: Box<AlgebraOperator>,
          on: Vec<(IURef, IURef)>, // Pairs of left = right equi-join predicates
      },
      // Dummy output operator. Something like "call this callback" or "send back over this socket"
      // would be added later
      Print {
-        input: Box<PhysicalQueryPlanOperator>,
+        input: Box<AlgebraOperator>,
         tuple_writer: Box<dyn TupleWriter>,
     },
     InlineTable {
         tuples: Vec<Tuple>,
     },
     Insert {
-        input: Box<PhysicalQueryPlanOperator>,
+        input: Box<AlgebraOperator>,
         table: TableDesc,
     },
     CreateTable {
@@ -139,13 +140,13 @@ pub enum ArithmeticExpression{
 }
  
  pub struct PhysicalQueryPlan {
-     pub root_operator: PhysicalQueryPlanOperator,
+     pub root_operator: AlgebraOperator,
      pub cost: f64
  }
 
  impl PhysicalQueryPlan {
     #[allow(dead_code)]
-    pub fn new(root_operator: PhysicalQueryPlanOperator, cost: f64) -> Self {
+    pub fn new(root_operator: AlgebraOperator, cost: f64) -> Self {
         Self { root_operator, cost }
     }
  }

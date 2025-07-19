@@ -3,11 +3,12 @@
           by applying rewrite rules and possibly using optimization techniques implemented in
           the optimizer module.
  */
+pub mod plan;
 pub mod bottomup;
 
 use std::{collections::BTreeMap, fmt::{Formatter, Debug, Display}};
 
-use crate::{access::tuple::Tuple, catalog::{AttributeDesc, IndexDesc, TableDesc}, execution::plan::PhysicalQueryPlan, types::TupleValue};
+use crate::{access::tuple::Tuple, catalog::{AttributeDesc, IndexDesc, TableDesc}, planner::plan::PhysicalQueryPlan, types::TupleValue};
 
 #[derive(Debug, Clone)]
 pub struct BoundTable {

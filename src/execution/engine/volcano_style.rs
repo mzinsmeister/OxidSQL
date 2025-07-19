@@ -2,7 +2,7 @@ use std::{cell::RefCell, collections::HashMap, error::Error, rc::Rc};
 
 use bitvec::vec::BitVec;
 
-use crate::{access::{tuple::Tuple, BTreeSegment, HeapStorage, Index, SlottedPageScan, SlottedPageSegment, StatisticsCollectingSPHeapStorage}, catalog::{AttributeDesc, Catalog, IndexDesc, IndexType, TableDesc, SAMPLE_SIZE}, execution::plan::{self, PhysicalQueryPlan, PhysicalQueryPlanOperator, TupleWriter}, storage::buffer_manager::BufferManager, types::{TupleValue, TupleValueType}};
+use crate::{access::{tuple::Tuple, BTreeScan, BTreeSegment, HeapStorage, Index, OrderedIndex, SlottedPageHeapStorage, SlottedPageSegment, StatisticsCollectingSPHeapStorage}, catalog::{Catalog, IndexDesc, IndexType, TableDesc, SAMPLE_SIZE}, planner::plan::{self, AlgebraOperator, PhysicalQueryPlan, TupleWriter}, storage::buffer_manager::BufferManager, types::{RelationTID, TupleValue, TupleValueType}};
 
 use super::ExecutionEngine;
 
@@ -13,36 +13,89 @@ trait Operator {
     fn get_output(&self) -> &[Register];
 }
 
-struct TableScan<B: BufferManager, F: FnMut(&[u8]) -> Option<Tuple>> {
+struct TableScan<B: BufferManager> {
     table_desc: TableDesc,
-    scan: SlottedPageScan<B, Tuple, F>,
+    scan: Box<dyn Iterator<Item = Result<(RelationTID, Box<[Option<TupleValue>]>), B::BError>>>,
     registers: Vec<Register>
 }
 
+struct IndexScan<B: BufferManager> {
+    table_desc: TableDesc,
+    heap: SlottedPageHeapStorage<B>,
+    scan: BTreeScan<B>,
+    registers: Vec<Register>,
+    upper_bound: Option<Vec<TupleValue>>,
+    upper_bound_inclusive: bool
+}
+
+impl<B: BufferManager> IndexScan<B> {
+    fn new(heap: SlottedPageHeapStorage<B>, 
+           table_desc: TableDesc, 
+           scan: BTreeScan<B>, 
+           upper_bound: Option<Vec<TupleValue>>, 
+           upper_bound_inclusive: bool) -> Self {
+
+        let mut registers = Vec::with_capacity(table_desc.attributes.len());
+        for _ in 0..table_desc.attributes.len() {
+            registers.push(Rc::new(RefCell::new(None)));
+        }
+        IndexScan {
+            heap,
+            table_desc,
+            scan,
+            registers,
+            upper_bound,
+            upper_bound_inclusive
+        }
+    }
+}
+
+impl<B: BufferManager> Iterator for IndexScan<B> {
+    type Item = Result<(RelationTID, Box<[Option<TupleValue>]>), B::BError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let index_next = self.scan.next()?;
+        if let Ok((key, tid)) = index_next {
+            let tuple = self.heap.get_tuple_all(tid).unwrap().unwrap();
+            Some(Ok((tid, tuple.values.into_boxed_slice())))
+        } else {
+            Some(Err(index_next.err().unwrap()))
+        }
+    }
+}
 // This is super ugly but there's no way to implement this inside the impl blocks
 // Because otherwise you would have to provide the F parameter for calling the function
-fn new_scan<'a, B: BufferManager>(sp_segment: SlottedPageSegment<B>, table_desc: TableDesc) -> TableScan<B, impl FnMut(&[u8]) -> Option<Tuple>> {
+fn new_scan<'a, B: BufferManager>(sp_segment: SlottedPageSegment<B>, table_desc: TableDesc, index: Option<BTreeSegment<B>>) -> TableScan<B> {
     let attribute_types: Vec<TupleValueType> = table_desc.attributes.iter().map(|a| a.data_type).collect();
     let mut registers = Vec::with_capacity(table_desc.attributes.len());
     for _ in 0..table_desc.attributes.len() {
         registers.push(Rc::new(RefCell::new(None)));
     }
+
+    let scan: Box<dyn Iterator<Item=_>> = if let Some(index) = index {
+        let heap = SlottedPageHeapStorage::new(sp_segment, attribute_types);
+        // TODO: Actually use bounds here! Otherwise index scan makes no sense
+        let btree_scan = index.begin(); 
+        Box::new(IndexScan::new(heap, table_desc.clone(), btree_scan, None, true))
+    } else {
+       Box::new(sp_segment.scan(Box::new(move |raw: &[u8]| {
+            let tuple = Tuple::parse_binary_all(&attribute_types, raw);
+            Some(tuple.values.into_boxed_slice())
+       })))
+    };
     TableScan { 
         registers,
         table_desc,
-        scan: sp_segment.scan(Box::new(move |raw: &[u8]| {
-            let tuple = Tuple::parse_binary_all(&attribute_types, raw);
-            Some(tuple)
-        }))
+        scan
     }
 }
 
-impl<'a, B: BufferManager, F: FnMut(&[u8]) -> Option<Tuple>> Operator for TableScan<B, F> {
+impl<'a, B: BufferManager> Operator for TableScan<B> {
     fn next(&mut self) -> Result<bool, Box<dyn Error>> {
         if let Some(tuple) = self.scan.next() {
             let (_, mut tuple) = tuple?;
             for i in 0..self.table_desc.attributes.len() {
-                self.registers[i].replace(tuple.values[i].take());
+                self.registers[i].replace(tuple[i].take());
             }
             Ok(true)
         } else {
@@ -399,7 +452,7 @@ impl<B: BufferManager> Operator for CreateIndex<B> {
         let index_attributes_types = self.catalog.find_table_by_id(self.index.indexed_id).unwrap().unwrap()
                 .attributes.iter()
                     .enumerate()
-                    .filter(|(i, a)| self.index.attributes.contains(&(*i as u32)))
+                    .filter(|(i, _)| self.index.attributes.contains(&(*i as u32)))
                     .map(|(_, a)| a.data_type)
                     .collect::<Vec<_>>();
         let index = match self.index.index_type {
@@ -482,34 +535,38 @@ impl<B: BufferManager> Engine<B> {
         }
     }
 
-    fn convert_physical_plan_to_volcano_plan(&self, buffer_manager: B, operator: PhysicalQueryPlanOperator) -> Result<Box<dyn Operator>, B::BError> {
+    fn convert_physical_plan_to_volcano_plan(&self, buffer_manager: B, operator: AlgebraOperator) -> Result<Box<dyn Operator>, B::BError> {
         Ok(match operator {
-            PhysicalQueryPlanOperator::Tablescan { table } => {
-                let segment = SlottedPageSegment::new(buffer_manager, table.segment_id, table.segment_id + 1);
-                Box::new(new_scan(segment, table))
+            AlgebraOperator::Tablescan { table, use_index } => {
+                let segment = SlottedPageSegment::new(buffer_manager.clone(), table.segment_id, table.segment_id + 1);
+                let index = use_index.map(|index_desc| {
+                    let key_types = index_desc.attributes.iter().map(|a| table.attributes[*a as usize].data_type).collect::<Vec<_>>();
+                    BTreeSegment::new(buffer_manager.clone(), index_desc.segment_id, key_types)
+                });
+                Box::new(new_scan(segment, table, index))
             },
-            PhysicalQueryPlanOperator::Print { input, tuple_writer } => {
+            AlgebraOperator::Print { input, tuple_writer } => {
                 let child = self.convert_physical_plan_to_volcano_plan(buffer_manager, *input)?;
                 Box::new(Print::new(child, tuple_writer))
             },
-            PhysicalQueryPlanOperator::Selection { predicate, input } => {
+            AlgebraOperator::Selection { predicate, input } => {
                 let child = self.convert_physical_plan_to_volcano_plan(buffer_manager, *input)?;
                 let predicate = self.convert_predicate_to_volcano_style(predicate, child.get_output());
                 Box::new(Selection::new(child, predicate))
             },
-            PhysicalQueryPlanOperator::HashJoin { left, right, on } => {
+            AlgebraOperator::HashJoin { left, right, on } => {
                 let left = self.convert_physical_plan_to_volcano_plan(buffer_manager.clone(), *left)?;
                 let right = self.convert_physical_plan_to_volcano_plan(buffer_manager, *right)?;
                 Box::new(HashJoin::new(left, right, on))
             },
-            PhysicalQueryPlanOperator::Projection { projection_ius, input } => {
+            AlgebraOperator::Projection { projection_ius, input } => {
                 let child = self.convert_physical_plan_to_volcano_plan(buffer_manager, *input)?;
                 Box::new(Projection::new(child, projection_ius))
             },
-            PhysicalQueryPlanOperator::InlineTable { tuples } => {
+            AlgebraOperator::InlineTable { tuples } => {
                 Box::new(InlineTable::new(tuples))
             },
-            PhysicalQueryPlanOperator::Insert { input, table } => {
+            AlgebraOperator::Insert { input, table } => {
                 let child = self.convert_physical_plan_to_volcano_plan(buffer_manager.clone(), *input)?;
                 let indexes = table.indexes.iter().map(|index| {
                     let attributes: Vec<_> = table.attributes.iter().enumerate().filter(|(_, a)| index.attributes.contains(&a.id)).collect();
@@ -524,9 +581,9 @@ impl<B: BufferManager> Engine<B> {
                 let storage = StatisticsCollectingSPHeapStorage::new(&table, buffer_manager, self.catalog.clone(), SAMPLE_SIZE as usize)?;
                 Box::new(Insert::new(child, storage, indexes))
             },
-            PhysicalQueryPlanOperator::CreateTable { table } =>
+            AlgebraOperator::CreateTable { table } =>
                 Box::new(CreateTable::new(self.catalog.clone(), table)),
-            PhysicalQueryPlanOperator::CreateIndex { index } => 
+            AlgebraOperator::CreateIndex { index } => 
                 Box::new(CreateIndex::new(self.catalog.clone(), buffer_manager, index)),
         })
     }
@@ -585,7 +642,7 @@ mod mock {
 mod test {
     use std::{rc::Rc, cell::RefCell, sync::Arc};
 
-    use crate::{storage::{page::PAGE_SIZE, buffer_manager::mock::MockBufferManager}, access::{SlottedPageSegment, tuple::Tuple, SlottedPageHeapStorage, HeapStorage}, types::{TupleValue, TupleValueType}, execution::{plan::{PhysicalQueryPlan, PhysicalQueryPlanOperator, mock::MockTupleWriter}, engine::volcano_style::{Selection, ArithmeticExpression, Print}}, catalog::{AttributeDesc, TableDesc, Catalog}, config::DbConfig};
+    use crate::{storage::{page::PAGE_SIZE, buffer_manager::mock::MockBufferManager}, access::{SlottedPageSegment, tuple::Tuple, SlottedPageHeapStorage, HeapStorage}, types::{TupleValue, TupleValueType}, execution::{plan::{PhysicalQueryPlan, AlgebraOperator, mock::MockTupleWriter}, engine::volcano_style::{Selection, ArithmeticExpression, Print}}, catalog::{AttributeDesc, TableDesc, Catalog}, config::DbConfig};
 
     use super::{super::ExecutionEngine, Operator, mock::MockVolcanoSourceOperator, new_scan}; 
 
@@ -796,9 +853,9 @@ mod test {
         let _lines2 = lines.clone();
         let tuple_writer = MockTupleWriter::new();
         let root_operator = PhysicalQueryPlan::new(
-            PhysicalQueryPlanOperator::Print {
+            AlgebraOperator::Print {
                 input: Box::new(
-                    PhysicalQueryPlanOperator::Tablescan {
+                    AlgebraOperator::Tablescan {
                         table: get_testtable_desc()
                     },
                 ),
@@ -822,8 +879,8 @@ mod test {
             Tuple::new(vec![Some(TupleValue::Int(3)), Some(TupleValue::String("c".to_string()))]),
         ];
         let root_operator = PhysicalQueryPlan::new(
-            PhysicalQueryPlanOperator::Insert {
-                input: Box::new(PhysicalQueryPlanOperator::InlineTable { tuples: tuples.clone() }),
+            AlgebraOperator::Insert {
+                input: Box::new(AlgebraOperator::InlineTable { tuples: tuples.clone() }),
                 table: get_testtable_desc()
             },
             200.0
@@ -858,7 +915,7 @@ mod test {
     fn test_create_table() {
         let buffer_manager = MockBufferManager::new(PAGE_SIZE);
         let root_operator = PhysicalQueryPlan::new(
-            PhysicalQueryPlanOperator::CreateTable {
+            AlgebraOperator::CreateTable {
                 table: get_testtable_desc()
             },
             0.0

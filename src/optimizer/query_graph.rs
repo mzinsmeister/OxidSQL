@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
-use crate::{execution::plan::PhysicalQueryPlanOperator, planner::{BoundTable, BoundAttributeRef, BoundTableRef}};
+use crate::{planner::plan::AlgebraOperator, planner::{BoundTable, BoundAttributeRef, BoundTableRef}};
 
 #[derive(Clone)]
 pub struct QueryNode {
     pub input: BoundTable,
     pub result_cardinality: u64,
-    pub source_plan: PhysicalQueryPlanOperator
+    pub source_plan: AlgebraOperator
 }
 
 #[derive(Debug, Clone)]
@@ -33,7 +33,7 @@ impl QueryGraph {
         }
     }
 
-    pub fn add_node(&mut self, input: BoundTable, cardinality: u64, source_plan: PhysicalQueryPlanOperator) {
+    pub fn add_node(&mut self, input: BoundTable, cardinality: u64, source_plan: AlgebraOperator) {
         let table_ref = input.to_ref();
         let index = self.graph.add_node(QueryNode {
             input,

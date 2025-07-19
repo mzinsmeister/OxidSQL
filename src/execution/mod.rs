@@ -7,5 +7,4 @@
           write a fork of the Volcano-style engine using a push based model first.
  */
 
-pub mod plan;
 pub mod engine;

@@ -2,7 +2,7 @@ use std::error::Error;
 
 use crate::storage::buffer_manager::BufferManager;
 
-use super::plan::PhysicalQueryPlan;
+use crate::planner::plan::PhysicalQueryPlan;
 
 pub mod volcano_style;
 

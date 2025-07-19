@@ -21,14 +21,16 @@ pub struct BTreeSegment<B: BufferManager> {
     key_attributes: Vec<TupleValueType>
 }
 
-#[allow(dead_code)]
 impl<B: BufferManager> BTreeSegment<B> {
     pub fn new(bm: B, segment_id: SegmentId, key_attributes: Vec<TupleValueType>) -> Self {
-        Self {
-            bm: bm.clone(),
-            segment_id,
-            key_attributes
-        }
+        Self { bm, segment_id, key_attributes }
+    }
+}
+
+#[allow(dead_code)]
+impl<B: BufferManager> BTreeSegment<B> {
+    pub fn begin(self) -> BTreeScan<B> {
+        BTreeScan { segment: self, page_guard: None, slot_id: 0 }
     }
 
     pub fn lower_bound(self, key: &[Option<TupleValue>]) -> Result<BTreeScan<B>, B::BError> {
@@ -229,13 +231,52 @@ impl<B: BufferManager> Index<B> for BTreeSegment<B> {
     }
 }
 
+pub struct OrderedIndexScan<B: BufferManager> {
+    btree_scan: BTreeScan<B>,
+    upper_bound: Option<Vec<Option<TupleValue>>>,
+}
+
+impl<B: BufferManager> Iterator for OrderedIndexScan<B> {
+    type Item = Result<(Box<[Option<TupleValue>]>, RelationTID), B::BError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(item) = self.btree_scan.next() {
+            if let Ok((tuple, tid)) = item {
+                if let Some(upper_bound) = &self.upper_bound {
+                    if &*tuple > upper_bound.as_slice() {
+                        return None;
+                    }
+                }
+                return Some(Ok((tuple, tid)));
+            } else {
+                return Some(item);
+            }
+        }
+        None
+    }
+}
+
 impl<B: BufferManager> OrderedIndex<B> for BTreeSegment<B> {
 
-    type ScanIterator = BTreeScan<B>;
+    type ScanIterator = OrderedIndexScan<B>;
 
-    fn scan(&self, _from: Option<&[Option<TupleValue>]>, _to: Option<&[Option<TupleValue>]>) -> Result<Self::ScanIterator, <B as BufferManager>::BError> {
-        // TODO: Implement this (cache matching TIDs (at least up to a few thousand entryies) upon construction to hold locks for as short as possible?)
-        todo!()
+    fn scan(&self, from: Option<&[Option<TupleValue>]>, to: Option<&[Option<TupleValue>]>) -> Result<Self::ScanIterator, <B as BufferManager>::BError> {
+        let base_scan = if let Some(from) = from {
+            self.clone().lower_bound(from)?
+        } else {
+            self.clone().begin()
+        };
+
+        let upper_bound = if let Some(to) = to {
+            Some(to.to_vec())
+        } else {
+            None
+        };
+
+        Ok(OrderedIndexScan {
+            btree_scan: base_scan,
+            upper_bound
+        })
     }
 }
 
@@ -522,6 +563,16 @@ pub struct BTreeScan<B: BufferManager> {
     segment: BTreeSegment<B>,
     slot_id: u16,
     page_guard: Option<BMArcReadGuard<B>>,
+}
+
+impl<B: BufferManager> BTreeScan<B> {
+    pub fn new(segment: BTreeSegment<B>, slot_id: u16) -> Self {
+        Self {
+            segment,
+            slot_id,
+            page_guard: None
+        }
+    }
 }
 
 impl<B: BufferManager> Iterator for BTreeScan<B> {

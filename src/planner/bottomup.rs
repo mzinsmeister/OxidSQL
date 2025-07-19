@@ -7,9 +7,9 @@ use std::collections::BTreeMap;
 
 use atomic::Ordering;
 
-use crate::{execution::plan::{PhysicalQueryPlan, self, PhysicalQueryPlanOperator, StdOutTupleWriter}, optimizer::{query_graph::QueryGraph, optimizer::{run_dp_ccp, OptimizerResult}}, types::{TupleValue, TupleValueType}, planner::BoundTableRef, catalog::{Catalog, AttributeDesc, SAMPLE_SIZE}, storage::buffer_manager::BufferManager, access::{SlottedPageHeapStorage, SlottedPageSegment, HeapStorage}};
+use crate::{planner::plan::{PhysicalQueryPlan, self, StdOutTupleWriter}, optimizer::{query_graph::QueryGraph, optimizer::{run_dp_ccp, OptimizerResult}}, types::{TupleValue, TupleValueType}, planner::BoundTableRef, catalog::{Catalog, AttributeDesc, SAMPLE_SIZE}, storage::buffer_manager::BufferManager, access::{SlottedPageHeapStorage, SlottedPageSegment, HeapStorage}};
 
-use super::{BoundAttribute, CreateIndexStatement, CreateTableStatement, InsertStatement, Planner, PlannerError, SelectQuery, SelectionOperator, Statement};
+use super::{plan::AlgebraOperator, BoundAttribute, CreateIndexStatement, CreateTableStatement, InsertStatement, Planner, PlannerError, SelectQuery, SelectionOperator, Statement};
 
 pub struct BottomUpPlanner<B: BufferManager> {
     buffer_manager: B,
@@ -33,7 +33,7 @@ impl<B: BufferManager> BottomUpPlanner<B> {
         let cost = optimizer_result.cost;
         let projection = self.get_projection(query, optimizer_result);
         let attribute_names = query.select.iter().map(BoundAttribute::get_qualified_name).collect();
-        let root_operator = PhysicalQueryPlanOperator::Print { 
+        let root_operator = AlgebraOperator::Print { 
             input: Box::new(projection), 
             tuple_writer: Box::new(StdOutTupleWriter::new(attribute_names)) 
         };
@@ -44,7 +44,7 @@ impl<B: BufferManager> BottomUpPlanner<B> {
         })
     }
 
-    fn get_projection(&self, query: &SelectQuery, optimizer_result: OptimizerResult) -> PhysicalQueryPlanOperator {
+    fn get_projection(&self, query: &SelectQuery, optimizer_result: OptimizerResult) -> AlgebraOperator {
         let plan = optimizer_result.plan_root;
     
         let mut projection_attribute_indexes = Vec::new();
@@ -57,7 +57,7 @@ impl<B: BufferManager> BottomUpPlanner<B> {
             projection_attribute_indexes.push(attribute_index);
         }
     
-        plan::PhysicalQueryPlanOperator::Projection {
+        plan::AlgebraOperator::Projection {
             projection_ius: projection_attribute_indexes,
             input: Box::new(plan),
         }
@@ -68,8 +68,9 @@ impl<B: BufferManager> BottomUpPlanner<B> {
         let (relation_cardinalities, relation_predicates) = self.get_cardinality_estimates(query)?;
         let mut query_graph = QueryGraph::new();
         for (relation_id, relation) in &query.from {
-            let table_scan = plan::PhysicalQueryPlanOperator::Tablescan {
-                table: relation.table.clone()
+            let table_scan = plan::AlgebraOperator::Tablescan {
+                table: relation.table.clone(),
+                use_index: None
             };
             let mut predicate = None;
             for (attribute_id, value, operator) in relation_predicates.get(relation_id).unwrap_or(&Vec::new()) {
@@ -89,7 +90,7 @@ impl<B: BufferManager> BottomUpPlanner<B> {
                 }
             }
             let plan = if let Some(predicate) = predicate {
-                plan::PhysicalQueryPlanOperator::Selection {
+                plan::AlgebraOperator::Selection {
                     predicate,
                     input: Box::new(table_scan),
                 }
@@ -168,9 +169,9 @@ impl<B: BufferManager> BottomUpPlanner<B> {
     }
 
     fn plan_insert(&self, insert: InsertStatement) -> Result<PhysicalQueryPlan, PlannerError> {
-        let root_operator = PhysicalQueryPlanOperator::Insert {
+        let root_operator = AlgebraOperator::Insert {
             table: insert.table,
-            input: Box::new(PhysicalQueryPlanOperator::InlineTable {
+            input: Box::new(AlgebraOperator::InlineTable {
                  tuples: insert.values,
             }),
         };
@@ -178,14 +179,14 @@ impl<B: BufferManager> BottomUpPlanner<B> {
     }
 
     fn plan_create_table(&self, create_table: CreateTableStatement) -> Result<PhysicalQueryPlan, PlannerError> {
-        let root_operator = PhysicalQueryPlanOperator::CreateTable {
+        let root_operator = AlgebraOperator::CreateTable {
             table: create_table.table,
         };
         Ok(PhysicalQueryPlan { root_operator, cost: 0.0 })
     }
 
     fn plan_create_index(&self, create_index: CreateIndexStatement) -> Result<PhysicalQueryPlan, PlannerError> {
-        let root_operator = PhysicalQueryPlanOperator::CreateIndex {
+        let root_operator = AlgebraOperator::CreateIndex {
             index: create_index.index
         };
         Ok(PhysicalQueryPlan { root_operator, cost: 0.0 })
@@ -270,12 +271,12 @@ mod test {
         let plan = planner.plan(query).unwrap();
         assert_eq!(plan.cost, 0.0);
         match plan.root_operator {
-            PhysicalQueryPlanOperator::Print { input, tuple_writer: _ } => {
+            AlgebraOperator::Print { input, tuple_writer: _ } => {
                 match *input {
-                    PhysicalQueryPlanOperator::Projection { projection_ius, input } => {
+                    AlgebraOperator::Projection { projection_ius, input } => {
                         assert_eq!(projection_ius, vec![0]);
                         match *input {
-                            PhysicalQueryPlanOperator::Tablescan { table } => {
+                            AlgebraOperator::Tablescan { table } => {
                                 assert_eq!(table, table0);
                             },
                             _ => unreachable!()
@@ -413,20 +414,20 @@ mod test {
         let plan = planner.plan(query).unwrap();
         assert_eq!(plan.cost, 0.0);
         match plan.root_operator {
-            PhysicalQueryPlanOperator::Print { input, tuple_writer: _ } => {
+            AlgebraOperator::Print { input, tuple_writer: _ } => {
                 match *input {
-                    PhysicalQueryPlanOperator::Projection { projection_ius, input } => {
+                    AlgebraOperator::Projection { projection_ius, input } => {
                         assert_eq!(projection_ius, vec![0, 2]);
                         match *input {
-                            PhysicalQueryPlanOperator::HashJoin { left, right, on } => {
+                            AlgebraOperator::HashJoin { left, right, on } => {
                                 match *left {
-                                    PhysicalQueryPlanOperator::Tablescan { table } => {
+                                    AlgebraOperator::Tablescan { table } => {
                                         assert_eq!(table, table0);
                                     },
                                     _ => unreachable!()
                                 }
                                 match *right {
-                                    PhysicalQueryPlanOperator::Tablescan { table } => {
+                                    AlgebraOperator::Tablescan { table } => {
                                         assert_eq!(table, table1);
                                     },
                                     _ => unreachable!()
@@ -478,10 +479,10 @@ mod test {
         let plan = planner.plan(query).unwrap();
         assert_eq!(plan.cost, 0.0);
         match plan.root_operator {
-            PhysicalQueryPlanOperator::Insert { input, table} => {
+            AlgebraOperator::Insert { input, table} => {
                 assert_eq!(table, table0);
                 match *input {
-                    PhysicalQueryPlanOperator::InlineTable { tuples } => {
+                    AlgebraOperator::InlineTable { tuples } => {
                         assert_eq!(tuples, vec![Tuple::new(vec![Some(TupleValue::Int(1)), Some(TupleValue::String("test".to_string()))])]);
                     },
                     _ => unreachable!()
@@ -526,7 +527,7 @@ mod test {
         let plan = planner.plan(query).unwrap();
         assert_eq!(plan.cost, 0.0);
         match plan.root_operator {
-            PhysicalQueryPlanOperator::CreateTable { table } => {
+            AlgebraOperator::CreateTable { table } => {
                 assert_eq!(table, table0);
             }
             _ => unreachable!() 
